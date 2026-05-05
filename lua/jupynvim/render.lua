@@ -371,20 +371,24 @@ local function render_cell(nb, cell, range, width, win)
     virt_lines = lines_below,
   })
 
-  -- Right bar on every visual row of a wrapped line. virt_text_win_col
-  -- covers the first visual row, eol_right_align covers the last. For
-  -- 3+-row wraps, place an overlay │ at each intermediate wrap point.
-  -- Inline `│ ` only takes two cells on the FIRST visual row. Rows 2..N
-  -- carry full `width` cells of source. So the source virtcol at the end
-  -- of visual row R is (width - 2) + (R - 1) * width = R * width - 2.
-  -- virtcol2col converts that virtcol to a buffer byte col; an overlay
-  -- there lands on the rightmost screen col of row R. linebreak=true
-  -- means the displaced char is whitespace.
+  -- Left bar uses inline virt_text with virt_text_repeat_linebreak so
+  -- the `│ ` shows on every wrapped row, not just the first. That
+  -- normalises every visual row to the same source capacity (width - 2)
+  -- and makes the wrap-point formula uniform.
+  --
+  -- Right bar on every visual row of a wrapped line:
+  --  • virt_text_win_col=width-1 covers the first row.
+  --  • eol_right_align covers the last row.
+  --  • For 3+-row wraps, overlay │ on each intermediate row at the
+  --    buffer column corresponding to virtcol r * (width - 2). With
+  --    linebreak=true the displaced character is a word-boundary space.
   local buf_lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+  local content_w = math.max(width - 2, 1)
   for ln = range.start, math.min(range.stop - 1, total - 1) do
     pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, 0, {
       virt_text = { { "│ ", HL_BORDER } },
       virt_text_pos = "inline",
+      virt_text_repeat_linebreak = true,
       hl_mode = "combine",
       priority = 100,
     })
@@ -402,13 +406,12 @@ local function render_cell(nb, cell, range, width, win)
     })
     local line_text = buf_lines[ln + 1] or ""
     local line_dw = vim.fn.strdisplaywidth(line_text)
-    if line_dw + 2 > 2 * width and #line_text > 0 then
-      local rows = math.floor((line_dw + 2) / width) + 1
-      if (line_dw + 2) % width == 0 then rows = rows - 1 end
-      for r = 2, rows - 1 do
-        local target_vcol = r * width - 2
+    if line_dw > 2 * content_w and #line_text > 0 then
+      local rows = math.ceil(line_dw / content_w)
+      for r = 1, rows - 1 do
+        local target_vcol = r * content_w
         local ok, buf_col = pcall(vim.fn.virtcol2col, win, ln + 1, target_vcol)
-        if ok and type(buf_col) == "number" and buf_col > 0 then
+        if ok and type(buf_col) == "number" and buf_col > 0 and buf_col <= #line_text then
           pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, buf_col - 1, {
             virt_text = { { "│", HL_BORDER } },
             virt_text_pos = "overlay",
