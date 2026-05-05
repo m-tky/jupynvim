@@ -371,16 +371,18 @@ local function render_cell(nb, cell, range, width, win)
     virt_lines = lines_below,
   })
 
-  -- Borders live in the text area at fixed columns so they line up with
-  -- the ┌ ┐ ├ ┤ └ ┘ glyphs in the header, divider, and footer.
-  --
-  -- Right bar uses two stacked marks. virt_text_win_col=width-1 lands on
-  -- the FIRST visual row of a wrapped line. virt_text_pos=eol_right_align
-  -- lands on the LAST visual row. Together they cover unwrapped lines
-  -- (both at the same column, the higher priority one wins) and lines
-  -- wrapping to two visual rows (each row gets one bar). Lines wrapping
-  -- to three or more rows still miss their middle rows; Neovim has no
-  -- per-visual-row API for naturally wrapped content.
+  -- Right bar on every visual row of a wrapped line. virt_text_win_col
+  -- covers the first row, virt_text_pos=eol_right_align covers the last
+  -- row. Middle rows of 3+-row wraps need overlay extmarks placed at the
+  -- buffer column that wraps to the rightmost screen col of each
+  -- intermediate row. screenpos is used per-line to find those columns;
+  -- overlay replaces the source char visually but with linebreak=true the
+  -- wrap happens at word boundaries so the displaced char is whitespace.
+  local buf_lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+  local rightmost_screen = total
+  if win and vim.api.nvim_win_is_valid(win) then
+    rightmost_screen = vim.api.nvim_win_get_width(win)
+  end
   for ln = range.start, math.min(range.stop - 1, total - 1) do
     pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, 0, {
       virt_text = { { "│ ", HL_BORDER } },
@@ -400,6 +402,34 @@ local function render_cell(nb, cell, range, width, win)
       hl_mode = "combine",
       priority = 50,
     })
+    -- Only spend the screenpos walk on lines that actually wrap.
+    local line_text = buf_lines[ln + 1] or ""
+    if vim.fn.strdisplaywidth(line_text) + 2 > width and #line_text > 0 then
+      local row_max = {}
+      for ci = 1, #line_text do
+        local sp = vim.fn.screenpos(win, ln + 1, ci)
+        if sp and sp.row and sp.row > 0 then
+          local rec = row_max[sp.row]
+          if not rec or sp.col > rec.col then
+            row_max[sp.row] = { col = sp.col, buf_col = ci }
+          end
+        end
+      end
+      local rows = {}
+      for r, _ in pairs(row_max) do table.insert(rows, r) end
+      table.sort(rows)
+      for i = 2, #rows - 1 do
+        local rec = row_max[rows[i]]
+        if rec.col == rightmost_screen and rec.buf_col >= 1 then
+          pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, rec.buf_col - 1, {
+            virt_text = { { "│", HL_BORDER } },
+            virt_text_pos = "overlay",
+            hl_mode = "combine",
+            priority = 100,
+          })
+        end
+      end
+    end
   end
 
   -- Markdown cells: render styling + transmit embedded images
