@@ -577,6 +577,123 @@ function M.kernel_picker(buf)
   end)
 end
 
+-- Toggle entry into the current cell's output. Output cells are rendered
+-- as virt_lines so the cursor cannot land on them in the main buffer.
+-- This opens the output text in a horizontal split below as a scratch
+-- buffer where vim motions, search, and yank work normally. Same key
+-- inside the scratch buffer closes it and returns the cursor to the
+-- original cell line.
+function M.toggle_output(buf)
+  -- If we're already inside a jupynvim output scratch, close and return.
+  local origin = pcall(vim.api.nvim_buf_get_var, buf, "jupynvim_origin_buf")
+  if origin then
+    local ok, origin_buf = pcall(vim.api.nvim_buf_get_var, buf, "jupynvim_origin_buf")
+    if ok and origin_buf then
+      local origin_line = nil
+      pcall(function() origin_line = vim.b[buf].jupynvim_origin_line end)
+      vim.cmd("close")
+      for _, w in ipairs(vim.fn.win_findbuf(origin_buf)) do
+        vim.api.nvim_set_current_win(w)
+        if origin_line then
+          pcall(vim.api.nvim_win_set_cursor, w, { origin_line, 0 })
+        end
+        return
+      end
+      return
+    end
+  end
+
+  local nb = Notebook.get(buf)
+  if not nb then return end
+  nb:sync_from_buffer()
+  local lnum = vim.api.nvim_win_get_cursor(0)[1]
+  local cell_id = nb:cell_at_line(lnum)
+  if not cell_id then return end
+  local cell = nb:get_cell(cell_id)
+  if not cell or cell.cell_type ~= "code" or not cell.outputs or #cell.outputs == 0 then
+    vim.notify("jupynvim: no output in this cell", vim.log.levels.INFO)
+    return
+  end
+
+  local function as_str(v)
+    if type(v) == "table" then return table.concat(v, "") end
+    if type(v) == "string" then return v end
+    return ""
+  end
+  local function strip_ansi(s)
+    s = s:gsub("\27%[[?]?[%d;]*[a-zA-Z]", "")
+    s = s:gsub("\27%][^\27]*\27\\", "")
+    s = s:gsub("\27.", "")
+    return s
+  end
+
+  local lines = {}
+  for _, o in ipairs(cell.outputs) do
+    if o.output_type == "stream" then
+      local txt = strip_ansi(as_str(o.text))
+      for line in (txt .. "\n"):gmatch("([^\n]*)\n") do
+        table.insert(lines, line)
+      end
+    elseif o.output_type == "execute_result" or o.output_type == "display_data" then
+      local data = o.data or {}
+      local txt = as_str(data["text/plain"])
+      if txt ~= "" then
+        for line in (txt .. "\n"):gmatch("([^\n]*)\n") do
+          table.insert(lines, line)
+        end
+      end
+      if data["image/png"] then
+        table.insert(lines, "[image/png — view in main notebook]")
+      end
+    elseif o.output_type == "error" then
+      table.insert(lines, as_str(o.ename) .. ": " .. as_str(o.evalue))
+      for _, tb in ipairs(o.traceback or {}) do
+        local txt = strip_ansi(as_str(tb))
+        for line in (txt .. "\n"):gmatch("([^\n]*)\n") do
+          table.insert(lines, line)
+        end
+      end
+    end
+  end
+  if lines[#lines] == "" then table.remove(lines) end
+  if #lines == 0 then
+    vim.notify("jupynvim: output has no text content", vim.log.levels.INFO)
+    return
+  end
+
+  local scratch = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(scratch, 0, -1, false, lines)
+  vim.api.nvim_set_option_value("modifiable", false, { buf = scratch })
+  vim.api.nvim_set_option_value("buftype", "nofile", { buf = scratch })
+  vim.api.nvim_set_option_value("bufhidden", "wipe", { buf = scratch })
+  vim.api.nvim_set_option_value("filetype", "jupynvim_output", { buf = scratch })
+  vim.b[scratch].jupynvim_origin_buf = buf
+  vim.b[scratch].jupynvim_origin_line = lnum
+  vim.api.nvim_buf_set_name(scratch,
+    string.format("jupynvim://Out[%s]", tostring(cell.execution_count or "?")))
+
+  local height = math.min(math.max(#lines, 4), math.floor(vim.o.lines * 0.4))
+  vim.cmd("belowright " .. height .. "split")
+  vim.api.nvim_set_current_buf(scratch)
+
+  -- Inside the output buffer, <C-j> / <C-k> / q all close it.
+  local close_map = function()
+    local origin_buf = vim.b.jupynvim_origin_buf
+    local origin_line = vim.b.jupynvim_origin_line
+    vim.cmd("close")
+    for _, w in ipairs(vim.fn.win_findbuf(origin_buf)) do
+      vim.api.nvim_set_current_win(w)
+      if origin_line then
+        pcall(vim.api.nvim_win_set_cursor, w, { origin_line, 0 })
+      end
+      return
+    end
+  end
+  vim.keymap.set("n", "<C-j>", close_map, { buffer = scratch, silent = true, desc = "Leave output" })
+  vim.keymap.set("n", "<C-k>", close_map, { buffer = scratch, silent = true, desc = "Leave output" })
+  vim.keymap.set("n", "q",     close_map, { buffer = scratch, silent = true, desc = "Leave output" })
+end
+
 -- Jump cursor to the next or previous cell that contains an image, either as
 -- a markdown embedded image or a code-cell image output. delta > 0 moves
 -- forward, delta < 0 moves backward.
