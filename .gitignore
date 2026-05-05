@@ -1,0 +1,29 @@
+# Rust build artifacts
+core/target/
+**/*.rs.bk
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Editor / OS
+.DS_Store
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Override global ignore so the project-level claude context ships with the repo.
+!.claude/
+!.claude/**
+
+# Logs
+*.log
+jupynvim.log
+kernel-*.json
+
+# Test scratch
+tests/.tmp/
