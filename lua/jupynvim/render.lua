@@ -371,36 +371,63 @@ local function render_cell(nb, cell, range, width, win)
     virt_lines = lines_below,
   })
 
-  -- Both borders live in the text area at fixed columns so they line up
-  -- with the ┌ ┐ ├ ┤ └ ┘ glyphs in the header, divider, and footer
-  -- (all at columns 0 and width-1).
-  --
-  -- For wrapped lines neovim only renders virt_text_win_col on the first
-  -- visual row, leaving continuation rows with no right bar. Stacking a
-  -- second mark with right_align at a lower priority adds a bar on the
-  -- last visual row too. Lower priority avoids doubling on unwrapped
-  -- lines where both marks land at the same column. lines wrapping to
-  -- two visual rows now get a bar on both rows. Three or more rows still
-  -- have a gap on the middle rows.
+  -- For lines that fit within width-2 visual cells (after the inline `│ `
+  -- prefix), draw both borders the cheap way: inline left bar + a single
+  -- virt_text_win_col right bar. For lines that would wrap, pre-wrap them
+  -- ourselves: conceal the source, replace with virt_lines that include
+  -- both borders on every wrapped row. neovim has no api for placing
+  -- virt_text on every visual row of a naturally wrapped line, so manual
+  -- wrap is the only way the right border reaches every continuation row.
+  -- markdown styling is applied to the original buffer line by markdown.lua
+  -- with hl_mode = combine, so the conceal still keeps the inline marks
+  -- around for re-application within wrap chunks (best effort: bold/italic
+  -- spans that survive the wrap edge will still highlight).
+  local buf_lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
   for ln = range.start, math.min(range.stop - 1, total - 1) do
-    pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, 0, {
-      virt_text = { { "│ ", HL_BORDER } },
-      virt_text_pos = "inline",
-      hl_mode = "combine",
-      priority = 100,
-    })
-    pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, 0, {
-      virt_text = { { "│", HL_BORDER } },
-      virt_text_win_col = width - 1,
-      hl_mode = "combine",
-      priority = 100,
-    })
-    pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, 0, {
-      virt_text = { { "│", HL_BORDER } },
-      virt_text_pos = "right_align",
-      hl_mode = "combine",
-      priority = 50,
-    })
+    local line_text = buf_lines[ln + 1] or ""
+    local line_w = vim.fn.strdisplaywidth(line_text)
+    -- the 2 below accounts for the inline `│ ` prefix that shifts the
+    -- buffer text right by two cells.
+    if line_w + 2 > width then
+      -- Pre-wrap: conceal source, render wrapped chunks as virt_lines
+      -- with both borders. Inline `│ ` is dropped on this line because
+      -- with_sides already provides the left bar on each chunk.
+      local chunks = wrap(line_text, width - 4)
+      pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, 0, {
+        end_col = #line_text,
+        conceal = "",
+        priority = 200,
+      })
+      pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, 0, {
+        virt_text = with_sides(chunks[1] or "", "Normal", width),
+        virt_text_pos = "overlay",
+        hl_mode = "combine",
+        priority = 105,
+      })
+      if #chunks > 1 then
+        local extra = {}
+        for i = 2, #chunks do
+          table.insert(extra, with_sides(chunks[i], "Normal", width))
+        end
+        pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, 0, {
+          virt_lines = extra,
+          priority = 105,
+        })
+      end
+    else
+      pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, 0, {
+        virt_text = { { "│ ", HL_BORDER } },
+        virt_text_pos = "inline",
+        hl_mode = "combine",
+        priority = 100,
+      })
+      pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, 0, {
+        virt_text = { { "│", HL_BORDER } },
+        virt_text_win_col = width - 1,
+        hl_mode = "combine",
+        priority = 100,
+      })
+    end
   end
 
   -- Markdown cells: render styling + transmit embedded images
