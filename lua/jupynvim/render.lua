@@ -371,13 +371,16 @@ local function render_cell(nb, cell, range, width, win)
     virt_lines = lines_below,
   })
 
-  -- Both borders live in the text area at fixed columns so they line up
-  -- with the ┌ ┐ ├ ┤ └ ┘ glyphs in the header, divider, and footer.
-  -- virt_text_win_col only renders on the first visual row of a wrapped
-  -- buffer line, so continuation rows lose the right bar. neovim has no
-  -- api for placing virt_text on every visual row of a wrapped line and
-  -- pre-wrapping via conceal+virt_lines fights with wrap=true and leaves
-  -- phantom blank rows. accept the gap on continuation rows.
+  -- Borders live in the text area at fixed columns so they line up with
+  -- the ┌ ┐ ├ ┤ └ ┘ glyphs in the header, divider, and footer.
+  --
+  -- Right bar uses two stacked marks. virt_text_win_col=width-1 lands on
+  -- the FIRST visual row of a wrapped line. virt_text_pos=eol_right_align
+  -- lands on the LAST visual row. Together they cover unwrapped lines
+  -- (both at the same column, the higher priority one wins) and lines
+  -- wrapping to two visual rows (each row gets one bar). Lines wrapping
+  -- to three or more rows still miss their middle rows; Neovim has no
+  -- per-visual-row API for naturally wrapped content.
   for ln = range.start, math.min(range.stop - 1, total - 1) do
     pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, 0, {
       virt_text = { { "│ ", HL_BORDER } },
@@ -390,6 +393,12 @@ local function render_cell(nb, cell, range, width, win)
       virt_text_win_col = width - 1,
       hl_mode = "combine",
       priority = 100,
+    })
+    pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, 0, {
+      virt_text = { { "│", HL_BORDER } },
+      virt_text_pos = "eol_right_align",
+      hl_mode = "combine",
+      priority = 50,
     })
   end
 
