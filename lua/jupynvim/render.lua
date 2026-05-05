@@ -588,8 +588,70 @@ function M.refresh(nb, win)
   end)
 end
 
+-- Decoration provider that places ephemeral overlay │ on each MIDDLE
+-- visual row of a wrapped buffer line. Runs during live redraw so
+-- screenpos returns the actual wrap layout (which depends on word
+-- boundaries from linebreak, conceal, and other things we can't
+-- determine from a static formula). For each long buffer line within
+-- topline..botline, we walk every byte, ask screenpos which screen
+-- row+col it ends up on, and record the byte that lands on the highest
+-- screen col within each visual row. That byte gets an overlay │, which
+-- replaces the source char visually with the border bar at the
+-- rightmost screen col of that row. Skipping the first and last visual
+-- rows because virt_text_win_col and eol_right_align already handle
+-- those.
+local _decor_ns = vim.api.nvim_create_namespace("jupynvim.wrap_border")
+local _decor_set = false
+local function setup_decoration_provider()
+  if _decor_set then return end
+  _decor_set = true
+  vim.api.nvim_set_decoration_provider(_decor_ns, {
+    on_win = function(_, winid, bufnr, topline, botline)
+      local nb = Notebook.get(bufnr)
+      if not nb then return false end
+      local total = vim.api.nvim_win_get_width(winid)
+      local last = math.min(botline + 5, vim.api.nvim_buf_line_count(bufnr) - 1)
+      local lines = vim.api.nvim_buf_get_lines(bufnr, topline, last + 1, false)
+      for offset, line in ipairs(lines) do
+        local ln = topline + offset - 1
+        if line ~= Notebook.CELL_SEP and #line > 0 then
+          if vim.fn.strdisplaywidth(line) + 2 > total then
+            local row_max = {}
+            for ci = 1, #line do
+              local sp = vim.fn.screenpos(winid, ln + 1, ci)
+              if sp and sp.row and sp.row > 0 then
+                local rec = row_max[sp.row]
+                if not rec or sp.col > rec.col then
+                  row_max[sp.row] = { col = sp.col, buf_col = ci }
+                end
+              end
+            end
+            local rows_sorted = {}
+            for r in pairs(row_max) do table.insert(rows_sorted, r) end
+            table.sort(rows_sorted)
+            for i = 2, #rows_sorted - 1 do
+              local rec = row_max[rows_sorted[i]]
+              if rec.buf_col >= 1 and rec.buf_col <= #line then
+                pcall(vim.api.nvim_buf_set_extmark, bufnr, _decor_ns, ln, rec.buf_col - 1, {
+                  virt_text = { { "│", HL_BORDER } },
+                  virt_text_pos = "overlay",
+                  hl_mode = "combine",
+                  priority = 100,
+                  ephemeral = true,
+                })
+              end
+            end
+          end
+        end
+      end
+      return false
+    end,
+  })
+end
+
 function M.setup_highlights()
   local hl = vim.api.nvim_set_hl
+  setup_decoration_provider()
   hl(0, HL_BORDER,    { fg = "#7aa2f7" })
   hl(0, HL_HEADER,    { fg = "#7aa2f7", bold = true })
   hl(0, HL_BUSY,      { fg = "#e0af68", bold = true })
