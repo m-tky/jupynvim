@@ -270,17 +270,15 @@ local function apply_line(buf, ns, lnum, raw)
     inline_styling(buf, ns, lnum, raw)
     return
   end
-  -- Bullet list. Use overlay alone (no conceal) so the marker char gets
-  -- visually replaced without collapsing its column, which used to confuse
-  -- neighbouring sign and right-border extmarks.
+  -- Bullet list
   local indent, marker = raw:match("^(%s*)([%-%*%+])%s+")
   if marker then
     set_mark(buf, ns, lnum, #indent, {
       end_col = #indent + 1,
       virt_text = { { "•", HL.Bullet } },
       virt_text_pos = "overlay",
+      conceal = "",
       hl_mode = "combine",
-      priority = 105,
     })
     inline_styling(buf, ns, lnum, raw)
     return

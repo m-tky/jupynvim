@@ -329,12 +329,21 @@ local PLACEHOLDER_ROWS, PLACEHOLDER_COLS = 32, 96
 -- Convert non-PNG image bytes to PNG via ImageMagick. Returns the PNG b64
 -- on success, nil on failure. Callers must handle nil (typically by falling
 -- back to a renderer that can read the source format directly, like chafa).
+local _warned_missing_magick = false
 local function ensure_png(b64, mime, callback)
   if mime == nil or mime == "image/png" or mime == "" then
     callback(b64); return
   end
   if vim.fn.executable("magick") ~= 1 and vim.fn.executable("convert") ~= 1 then
     log.warn("ensure_png: ImageMagick not found, cannot convert " .. tostring(mime))
+    if not _warned_missing_magick then
+      _warned_missing_magick = true
+      vim.schedule(function()
+        vim.notify(
+          "jupynvim: ImageMagick not found. Non-PNG images (gif, jpg, svg) will fall back to chafa ascii. Install with `brew install imagemagick` for native PNG rendering.",
+          vim.log.levels.WARN)
+      end)
+    end
     callback(nil); return
   end
   local raw_ok, raw = pcall(vim.base64.decode, b64)

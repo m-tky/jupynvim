@@ -334,22 +334,65 @@ local function render_cell(nb, cell, range, width, win)
     virt_lines = lines_below,
   })
 
-  -- Left border: sign_text (works on wrapped continuation rows when supported).
-  -- Right border: virt_text_pos="right_align" — places at the rightmost
-  -- displayed column regardless of width math (more reliable than win_col
-  -- when actual gutter width differs from our calculation).
+  -- Left border lives in the sign column. Right border lives at a fixed
+  -- text-area column via virt_text_win_col so it lines up with the
+  -- ┐ / ┤ / ┘ glyphs in the header, divider, and footer.
+  --
+  -- Long lines are a special case. virt_text_win_col only renders on the
+  -- first visual row of a wrapped line, so wrapping in Neovim leaves
+  -- continuation rows with no right border. We side-step that by wrapping
+  -- the content ourselves: conceal the original buffer line and render the
+  -- wrapped chunks as virt_lines that include both borders. The first chunk
+  -- is overlaid onto the buffer line so we don't introduce a phantom blank
+  -- row above the content. The buffer's own `wrap` is set to false in
+  -- init.lua so insert mode shows the source on a single horizontally-
+  -- scrolling row instead of wrapping out of sync with the virt_lines.
   for ln = range.start, math.min(range.stop - 1, total - 1) do
     pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, 0, {
       sign_text = "│ ",
       sign_hl_group = HL_BORDER,
       priority = 100,
     })
-    pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, 0, {
-      virt_text = { { "│", HL_BORDER } },
-      virt_text_pos = "right_align",
-      hl_mode = "combine",
-      priority = 100,
-    })
+    local line_text = vim.api.nvim_buf_get_lines(buf, ln, ln + 1, false)[1] or ""
+    local line_w = vim.fn.strdisplaywidth(line_text)
+    if line_w > width - 4 then
+      local chunks = wrap(line_text, width - 4)
+      if #chunks > 1 then
+        pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, 0, {
+          end_col = #line_text,
+          conceal = "",
+          hl_mode = "combine",
+          priority = 200,
+        })
+        pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, 0, {
+          virt_text = with_sides(chunks[1], "Normal", width),
+          virt_text_pos = "overlay",
+          hl_mode = "combine",
+          priority = 105,
+        })
+        local extra = {}
+        for i = 2, #chunks do
+          table.insert(extra, with_sides(chunks[i], "Normal", width))
+        end
+        pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, 0, {
+          virt_lines = extra,
+        })
+      else
+        pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, 0, {
+          virt_text = { { "│", HL_BORDER } },
+          virt_text_win_col = width - 1,
+          hl_mode = "combine",
+          priority = 100,
+        })
+      end
+    else
+      pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, 0, {
+        virt_text = { { "│", HL_BORDER } },
+        virt_text_win_col = width - 1,
+        hl_mode = "combine",
+        priority = 100,
+      })
+    end
   end
 
   -- Markdown cells: render styling + transmit embedded images
