@@ -371,23 +371,28 @@ local function render_cell(nb, cell, range, width, win)
     virt_lines = lines_below,
   })
 
-  -- Borders. Inline `│ ` at col 0 puts the left bar on row 1. showbreak
-  -- (set in init.lua) puts a `│ ` on every wrap continuation row.
-  -- For the right bar: `virt_text_pos = "right_align"` with
-  -- virt_text_repeat_linebreak = true. virt_text_repeat_linebreak was
-  -- added in Neovim 0.10 and works specifically with right_align,
-  -- win_col, and overlay (verified by indent-blankline.nvim's
-  -- ibl/init.lua and Neovim's own test suite). It places the same virt
-  -- text on every visual row of a wrapped buffer line, regardless of
-  -- whether the wrap count is 1, 2, 3, or more. The native test in
-  -- neovim/test/functional/ui/mouse_spec.lua proves right_align +
-  -- repeat_linebreak puts a char on every row of a wrapped line.
+  -- Borders. Both bars use virt_text_repeat_linebreak so they appear on
+  -- every visual row of a wrapped line, independent of wrap row count.
+  -- Left bar: virt_text_win_col=0 (text area col 0) with `│ `. To keep
+  -- the bar from overlaying source text on continuation rows, init.lua
+  -- sets breakindent + breakindentopt=min:2 which gives continuation
+  -- rows 2 cells of empty indent at col 0. The inline mark provides the
+  -- same 2-cell shift on the first row by inserting `│ ` before source.
+  -- Right bar: virt_text_pos=right_align with repeat_linebreak. Both
+  -- are documented to repeat per drawline.c lines 370-372.
   for ln = range.start, math.min(range.stop - 1, total - 1) do
     pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, 0, {
       virt_text = { { "│ ", HL_BORDER } },
       virt_text_pos = "inline",
       hl_mode = "combine",
       priority = 100,
+    })
+    pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, 0, {
+      virt_text = { { "│ ", HL_BORDER } },
+      virt_text_win_col = 0,
+      virt_text_repeat_linebreak = true,
+      hl_mode = "combine",
+      priority = 95,
     })
     pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, 0, {
       virt_text = { { "│", HL_BORDER } },
