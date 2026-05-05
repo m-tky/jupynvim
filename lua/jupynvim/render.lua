@@ -371,12 +371,17 @@ local function render_cell(nb, cell, range, width, win)
     virt_lines = lines_below,
   })
 
-  -- Borders: inline left + virt_text_win_col right (first visual row) +
-  -- eol_right_align (last visual row). 3+-row wraps lose middle rows;
-  -- there's no Neovim API to put virt_text on every visual row of a
-  -- wrapped line, and every workaround tried so far either breaks vim
-  -- motions or depends on wrap/linebreak/showbreak settings being what
-  -- we expect when other config can override them.
+  -- Borders. Inline `│ ` at col 0 puts the left bar on row 1. showbreak
+  -- (set in init.lua) puts a `│ ` on every wrap continuation row.
+  -- For the right bar: `virt_text_pos = "right_align"` with
+  -- virt_text_repeat_linebreak = true. virt_text_repeat_linebreak was
+  -- added in Neovim 0.10 and works specifically with right_align,
+  -- win_col, and overlay (verified by indent-blankline.nvim's
+  -- ibl/init.lua and Neovim's own test suite). It places the same virt
+  -- text on every visual row of a wrapped buffer line, regardless of
+  -- whether the wrap count is 1, 2, 3, or more. The native test in
+  -- neovim/test/functional/ui/mouse_spec.lua proves right_align +
+  -- repeat_linebreak puts a char on every row of a wrapped line.
   for ln = range.start, math.min(range.stop - 1, total - 1) do
     pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, 0, {
       virt_text = { { "│ ", HL_BORDER } },
@@ -386,15 +391,10 @@ local function render_cell(nb, cell, range, width, win)
     })
     pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, 0, {
       virt_text = { { "│", HL_BORDER } },
-      virt_text_win_col = width - 1,
+      virt_text_pos = "right_align",
+      virt_text_repeat_linebreak = true,
       hl_mode = "combine",
       priority = 100,
-    })
-    pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, 0, {
-      virt_text = { { "│", HL_BORDER } },
-      virt_text_pos = "eol_right_align",
-      hl_mode = "combine",
-      priority = 50,
     })
   end
 
