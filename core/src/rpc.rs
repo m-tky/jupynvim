@@ -210,6 +210,7 @@ impl Server {
             "insert_cell" => self.insert_cell(p).await,
             "delete_cell" => self.delete_cell(p).await,
             "move_cell" => self.move_cell(p).await,
+            "clear_outputs" => self.clear_outputs(p).await,
             "save" => self.save(p).await,
             "save_as" => self.save_as(p).await,
             "replace_cells" => self.replace_cells(p).await,
@@ -473,6 +474,15 @@ impl Server {
         let sid = p.get("session_id").and_then(|v| v.as_str()).ok_or_else(|| anyhow!("session_id"))?;
         let s = self.sessions.get(sid).ok_or_else(|| anyhow!("no session"))?;
         s.save()?;
+        Ok(json!({ "ok": true }))
+    }
+
+    /// Clear outputs and execution_count for every cell in the session.
+    /// Mirrors `jupyter nbconvert --clear-output` semantics.
+    async fn clear_outputs(&self, p: Json) -> Result<Json> {
+        let sid = p.get("session_id").and_then(|v| v.as_str()).ok_or_else(|| anyhow!("session_id"))?;
+        let s = self.sessions.get(sid).ok_or_else(|| anyhow!("no session"))?.clone();
+        s.clear_outputs();
         Ok(json!({ "ok": true }))
     }
 

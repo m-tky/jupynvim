@@ -159,7 +159,11 @@ function M.open(path, opts)
   -- Create or reuse the buffer
   local buf = vim.fn.bufnr(abs, true)
   vim.api.nvim_buf_set_name(buf, abs)
-  vim.api.nvim_buf_set_option(buf, "buftype", "acwrite")
+  -- Leaving buftype empty (instead of acwrite) so LSP, formatters, and
+  -- copilot treat this like a regular source file. BufWriteCmd still
+  -- intercepts :w so our save path serialises cells via the backend
+  -- rather than dumping the visible buffer text to disk.
+  vim.api.nvim_buf_set_option(buf, "buftype", "")
   vim.api.nvim_buf_set_option(buf, "swapfile", false)
   vim.api.nvim_buf_set_option(buf, "modifiable", true)
   vim.api.nvim_buf_set_option(buf, "filetype", language_filetype(snap))
@@ -554,6 +558,29 @@ function M.interrupt_kernel(buf)
   ensure_client():call("interrupt_kernel", { session_id = nb.session_id }, function() end)
 end
 
+-- Clear outputs and execution_count from every cell in the notebook.
+-- Mirrors `jupyter nbconvert --clear-output --inplace`. Local Lua state
+-- and backend state are both wiped; saving writes the cleared notebook.
+function M.clear_outputs(buf)
+  local nb = Notebook.get(buf)
+  if not nb then return end
+  for _, c in ipairs(nb.cells) do
+    c.outputs = {}
+    c.execution_count = nil
+    nb.cell_state[c.id] = nil
+  end
+  -- Drop any image placements tied to these outputs.
+  pcall(function() require("jupynvim.image").clear_all() end)
+  nb.image_ids = {}
+  ensure_client():call("clear_outputs", { session_id = nb.session_id }, function(err)
+    if err then
+      vim.notify("clear_outputs: " .. tostring(err), vim.log.levels.ERROR)
+      return
+    end
+    vim.schedule(function() Render.refresh(nb, vim.fn.bufwinid(buf)) end)
+  end)
+end
+
 function M.restart_kernel(buf)
   local nb = Notebook.get(buf)
   if not nb then return end
@@ -907,6 +934,7 @@ function M.setup(opts)
   vim.api.nvim_create_user_command("JupynvimRunAll", function() M.run_all(0) end, {})
   vim.api.nvim_create_user_command("JupynvimKernel", function() M.kernel_picker(0) end, {})
   vim.api.nvim_create_user_command("JupynvimRestart", function() M.restart_kernel(0) end, {})
+  vim.api.nvim_create_user_command("JupynvimClearOutputs", function() M.clear_outputs(0) end, {})
 
   -- Nuclear reset: close all sessions, wipe all notebook buffers, reload from disk.
   vim.api.nvim_create_user_command("JupynvimReset", function()
