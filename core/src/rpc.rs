@@ -396,8 +396,11 @@ impl Server {
         Ok(json!({ "msg_id": msg_id }))
     }
 
-    /// Run a code snippet on the kernel without binding to any cell. Output is
-    /// silently discarded (no msg_to_cell mapping → events go to "global").
+    /// Run a code snippet on the kernel without binding to any cell. silent
+    /// + store_history=false so the run does not increment the execution
+    /// counter, doesn't broadcast iopub output, and stays out of the
+    /// kernel's Out[N] cache. Used to inject things like the matplotlib
+    /// inline magic at kernel start without polluting cell numbering.
     async fn execute_silent(&self, p: Json) -> Result<Json> {
         let sid = p.get("session_id").and_then(|v| v.as_str()).ok_or_else(|| anyhow!("session_id"))?;
         let code = p.get("code").and_then(|v| v.as_str()).ok_or_else(|| anyhow!("code"))?;
@@ -405,7 +408,7 @@ impl Server {
         let guard = session.kernel.read().await;
         let kernel = guard.as_ref().ok_or_else(|| anyhow!("kernel not started"))?;
         let msg_id = uuid::Uuid::new_v4().to_string();
-        kernel.execute_with_id(code, msg_id.clone()).await?;
+        kernel.execute_with_id_opts(code, msg_id.clone(), true, false).await?;
         Ok(json!({ "msg_id": msg_id }))
     }
 

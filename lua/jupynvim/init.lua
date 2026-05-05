@@ -169,14 +169,16 @@ function M.open(path, opts)
   vim.api.nvim_buf_set_option(buf, "modifiable", true)
   local ft = language_filetype(snap)
   vim.api.nvim_buf_set_option(buf, "filetype", ft)
-  -- Some LSPs and formatters cache the first FileType event and skip
-  -- non-empty buftype values. Force a second FileType pass and ask
-  -- nvim-lspconfig (if loaded) to attach the matching server here.
+  -- Re-fire the autocmds plugins typically use to attach: BufRead,
+  -- BufReadPost (Mason/lspconfig hook into these), then FileType.
+  -- LspStart is nvim-lspconfig specific; not all setups have it but
+  -- the pcall makes that a no-op.
   vim.schedule(function()
-    if vim.api.nvim_buf_is_valid(buf) then
-      vim.api.nvim_exec_autocmds("FileType", { buffer = buf, modeline = false })
-      pcall(vim.cmd, "LspStart")
-    end
+    if not vim.api.nvim_buf_is_valid(buf) then return end
+    vim.api.nvim_exec_autocmds("BufRead", { buffer = buf, modeline = false })
+    vim.api.nvim_exec_autocmds("BufReadPost", { buffer = buf, modeline = false })
+    vim.api.nvim_exec_autocmds("FileType", { buffer = buf, modeline = false })
+    pcall(vim.cmd, "LspStart")
   end)
 
   local nb = Notebook.create(buf, abs, sid, snap)
@@ -311,8 +313,6 @@ function M._save(nb)
   local incoming = {}
   for _, c in ipairs(nb.cells) do
     local src = c.source or ""
-    -- Markdown cells: restore original embedded data:image/...;base64,XXX URIs
-    -- before saving so the .ipynb on disk keeps them intact.
     if c.cell_type == "markdown" then
       src = Embedded.postprocess(c.id, src)
     end
@@ -322,29 +322,29 @@ function M._save(nb)
       source = src,
     })
   end
-  cl:call("replace_cells", { session_id = nb.session_id, cells = incoming }, function(err, res)
-    if err then
-      vim.notify("replace_cells failed: " .. tostring(err), vim.log.levels.ERROR)
-      return
+  -- Synchronous RPC. BufWriteCmd has to block until the on-disk file is
+  -- actually written; if we return early, :wqa quits before the save
+  -- completes and the file is left in whatever state was before this
+  -- write, which is what was making :wqa appear to drop changes.
+  local rerr, rres = cl:call_sync("replace_cells",
+    { session_id = nb.session_id, cells = incoming }, 5000)
+  if rerr then
+    vim.notify("replace_cells failed: " .. tostring(rerr), vim.log.levels.ERROR)
+    return
+  end
+  if rres and rres.ids then
+    for i, new_id in ipairs(rres.ids) do
+      if nb.cells[i] then nb.cells[i].id = new_id end
     end
-    -- Update local ids in case any "new_*" placeholders got assigned real ids
-    if res and res.ids then
-      for i, new_id in ipairs(res.ids) do
-        if nb.cells[i] then nb.cells[i].id = new_id end
-      end
-    end
-    cl:call("save", { session_id = nb.session_id }, function(serr)
-      if serr then
-        vim.notify("save failed: " .. tostring(serr), vim.log.levels.ERROR)
-        return
-      end
-      vim.schedule(function()
-        if vim.api.nvim_buf_is_valid(nb.buf) then
-          vim.api.nvim_buf_set_option(nb.buf, "modified", false)
-        end
-      end)
-    end)
-  end)
+  end
+  local serr = cl:call_sync("save", { session_id = nb.session_id }, 5000)
+  if serr then
+    vim.notify("save failed: " .. tostring(serr), vim.log.levels.ERROR)
+    return
+  end
+  if vim.api.nvim_buf_is_valid(nb.buf) then
+    vim.api.nvim_buf_set_option(nb.buf, "modified", false)
+  end
 end
 
 -- ---------- public API (called by keymaps) ----------

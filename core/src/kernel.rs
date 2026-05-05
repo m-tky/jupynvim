@@ -226,10 +226,24 @@ impl Kernel {
     /// pre-registering msg_id → cell_id BEFORE the request goes out, avoiding
     /// the race where iopub events arrive before the routing map is updated.
     pub async fn execute_with_id(&self, code: &str, msg_id: String) -> Result<String> {
+        self.execute_with_id_opts(code, msg_id, false, true).await
+    }
+
+    /// `execute_with_id` with explicit silent and store_history flags.
+    /// silent=true tells the kernel not to broadcast iopub results AND
+    /// not to increment the execution counter. store_history=false also
+    /// keeps the run out of Out[N] cache.
+    pub async fn execute_with_id_opts(
+        &self,
+        code: &str,
+        msg_id: String,
+        silent: bool,
+        store_history: bool,
+    ) -> Result<String> {
         let mut msg = Message::new(
             "execute_request",
             self.session.clone(),
-            protocol::execute_request(code, false, true),
+            protocol::execute_request(code, silent, store_history),
         );
         msg.header.msg_id = msg_id.clone();
         let key = self.conn.key.as_bytes();
