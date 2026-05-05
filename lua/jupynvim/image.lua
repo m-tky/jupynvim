@@ -327,8 +327,66 @@ end
 -- Larger = higher resolution = clearer image; bounded by typical terminal size.
 local PLACEHOLDER_ROWS, PLACEHOLDER_COLS = 32, 96
 
--- Convert non-PNG image data to PNG via ImageMagick. Kitty graphics protocol
--- f=100 is PNG-only; for gif/jpg/webp/svg we shell out and convert first.
+-- Extract every frame of an animated GIF as PNG along with per-frame delays.
+-- Returns { frames = { b64, b64, ... }, delays = { ms, ms, ... } } or nil.
+-- Used to drive timer-based animation since Ghostty 1.3 doesn't implement
+-- the kitty animation protocol (a=f / a=a / a=c return "unimplemented action").
+-- We re-transmit each frame with the same image_id; Ghostty replaces the
+-- image on retransmit and the placeholders on screen refresh automatically.
+local function extract_gif_frames(b64)
+  local raw_ok, raw = pcall(vim.base64.decode, b64)
+  if not raw_ok or not raw then return nil end
+  local in_path = vim.fn.tempname() .. ".gif"
+  local f = io.open(in_path, "wb")
+  if not f then return nil end
+  f:write(raw); f:close()
+  local in_q = vim.fn.shellescape(in_path)
+
+  local fc_str = vim.fn.system(string.format(
+    "magick identify -format '%%n ' %s 2>/dev/null", in_q))
+  local frame_count = tonumber(fc_str:match("^%s*(%d+)")) or 1
+  if frame_count <= 1 then
+    pcall(os.remove, in_path)
+    return nil
+  end
+
+  local delays_str = vim.fn.system(string.format(
+    "magick identify -format '%%T\\n' %s 2>/dev/null", in_q))
+  local delays = {}
+  for d in delays_str:gmatch("(%d+)") do
+    local ms = tonumber(d) * 10
+    if ms < 20 then ms = 100 end
+    table.insert(delays, ms)
+  end
+
+  -- Cap frame count so a 1000-frame gif doesn't lock up the editor.
+  local MAX_FRAMES = 60
+  local n = math.min(frame_count, MAX_FRAMES)
+  local frames = {}
+  for i = 0, n - 1 do
+    local out_path = vim.fn.tempname() .. ".png"
+    -- -coalesce flattens disposal/disposal-restore so each frame is the full
+    -- composited picture, not a delta against the previous frame.
+    local cmd = string.format(
+      "magick %s -coalesce %s 2>/dev/null",
+      vim.fn.shellescape(in_path .. "[" .. i .. "]"),
+      vim.fn.shellescape(out_path))
+    vim.fn.system(cmd)
+    if vim.fn.filereadable(out_path) ~= 1 then
+      pcall(os.remove, in_path)
+      return nil
+    end
+    local pf = io.open(out_path, "rb")
+    local png_bytes = pf:read("*a")
+    pf:close()
+    pcall(os.remove, out_path)
+    table.insert(frames, vim.base64.encode(png_bytes))
+  end
+  pcall(os.remove, in_path)
+  log.info(string.format("extract_gif_frames: %d frames extracted", #frames))
+  return { frames = frames, delays = delays }
+end
+
 -- Convert non-PNG image bytes to PNG via ImageMagick. Returns the PNG b64
 -- on success, nil on failure. Callers must handle nil (typically by falling
 -- back to a renderer that can read the source format directly, like chafa).
@@ -379,6 +437,35 @@ local function ensure_png(b64, mime, callback)
   callback(vim.base64.encode(png_bytes))
 end
 
+-- Drive a placement's animation by re-transmitting the next frame to the
+-- same image_id on a timer. Ghostty 1.3 doesn't implement the kitty
+-- animation protocol, but it does replace image data on retransmit
+-- (graphics_storage.zig: addImage frees any existing image with the same
+-- id), so the placeholders showing that id refresh on each tick.
+local function start_animation(p, cell_id)
+  if not p or not p.frames or #p.frames < 2 then return end
+  if p.timer then pcall(p.timer.stop, p.timer); pcall(p.timer.close, p.timer) end
+  p.frame_idx = 1
+  p.cell_id = cell_id
+  local function tick()
+    -- Stop if the placement was cleared from under us.
+    if placements[cell_id] ~= p then
+      if p.timer then pcall(p.timer.stop, p.timer); pcall(p.timer.close, p.timer) end
+      p.timer = nil
+      return
+    end
+    p.frame_idx = (p.frame_idx % #p.frames) + 1
+    local seq = build_transmit_only(p.image_id, p.frames[p.frame_idx])
+    tty_write(seq)
+    if p.timer then
+      local d = p.delays[p.frame_idx] or 100
+      pcall(p.timer.start, p.timer, d, 0, vim.schedule_wrap(tick))
+    end
+  end
+  p.timer = vim.loop.new_timer()
+  pcall(p.timer.start, p.timer, p.delays[1] or 100, 0, vim.schedule_wrap(tick))
+end
+
 function M.ensure_transmitted(cell_id, b64, callback, opts)
   opts = opts or {}
   local renderer = opts.renderer or "chafa"
@@ -394,9 +481,16 @@ function M.ensure_transmitted(cell_id, b64, callback, opts)
   -- If conversion fails (no magick, or unsupported source), fall through to
   -- chafa so the user sees something rather than a blank cell.
   if mime and mime ~= "image/png" and renderer ~= "chafa" then
+    -- For animated GIFs in placeholder mode, extract every frame so we can
+    -- swap them on a timer. extract_gif_frames returns nil for static GIFs.
+    local anim = nil
+    if mime == "image/gif" and renderer == "placeholder" then
+      anim = extract_gif_frames(b64)
+    end
     ensure_png(b64, mime, function(png_b64)
       if png_b64 then
         opts.mime = "image/png"
+        opts._anim = anim
         M.ensure_transmitted(cell_id, png_b64, callback, opts)
       elseif vim.fn.executable("chafa") == 1 then
         log.info("falling back to chafa for " .. tostring(mime))
@@ -422,17 +516,19 @@ function M.ensure_transmitted(cell_id, b64, callback, opts)
       callback(nil)
       return
     end
-    placements[cell_id] = {
+    local p = {
       image_id = id, png_hash = h, b64 = b64,
       placement_id = id, renderer = "placeholder",
       rows = PLACEHOLDER_ROWS, cols = PLACEHOLDER_COLS,
     }
-    log.info(string.format("placeholder: cell=%s id=%d transmitted ok, fg=#%06x",
-      cell_id, id, id))
-    vim.schedule(function()
-      vim.notify(string.format("jupynvim: placeholder image %d (%dx%d cells)",
-        id, PLACEHOLDER_COLS, PLACEHOLDER_ROWS), vim.log.levels.INFO)
-    end)
+    if opts._anim and opts._anim.frames and #opts._anim.frames > 1 then
+      p.frames = opts._anim.frames
+      p.delays = opts._anim.delays
+    end
+    placements[cell_id] = p
+    if p.frames then start_animation(p, cell_id) end
+    log.info(string.format("placeholder: cell=%s id=%d transmitted ok, fg=#%06x%s",
+      cell_id, id, id, p.frames and (" animated " .. #p.frames .. " frames") or ""))
     callback(id)
     return
   end
@@ -527,19 +623,29 @@ function M.force_replace(cell_id)
   if p then p.placed_row = nil; p.placed_col = nil end
 end
 
+local function stop_timer(p)
+  if p and p.timer then
+    pcall(p.timer.stop, p.timer)
+    pcall(p.timer.close, p.timer)
+    p.timer = nil
+  end
+end
+
 function M.clear_for_cell(cell_id)
   local p = placements[cell_id]
   if not p then return end
+  stop_timer(p)
   tty_write(string.format("\x1b_Ga=d,d=I,i=%d,q=2\x1b\\", p.image_id))
   placements[cell_id] = nil
 end
 
 function M.clear_all()
   for k, p in pairs(placements) do
+    stop_timer(p)
     if p.image_id then
       tty_write(string.format("\x1b_Ga=d,d=I,i=%d,q=2\x1b\\", p.image_id))
     end
-    placements[k] = nil  -- clear in place so closure refs stay valid
+    placements[k] = nil
   end
   tty_write("\x1b_Ga=d,d=A,q=2\x1b\\")
 end
