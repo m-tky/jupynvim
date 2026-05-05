@@ -207,14 +207,12 @@ function M._populate_buffer(nb)
   vim.api.nvim_buf_set_option(nb.buf, "modifiable", true)
   vim.api.nvim_buf_set_lines(nb.buf, 0, -1, false, lines)
   vim.api.nvim_buf_set_option(nb.buf, "modified", false)
-  -- wrap=false because Neovim's virt_text_win_col renders only on the first
-  -- visual row of a wrapped line, so continuation rows lose the right border.
-  -- render.lua wraps long content manually into virt_lines that include both
-  -- borders, and the buffer line stays a single horizontally-scrolling row in
-  -- insert mode for editing.
+  -- wrap=true with linebreak + breakindent gives word-wrapped editing for
+  -- long content. showbreak="│ " keeps the left border visible on every
+  -- continuation row. Right border on continuation rows is a known gap.
   for _, win in ipairs(vim.fn.win_findbuf(nb.buf)) do
     vim.api.nvim_win_call(win, function()
-      vim.cmd("setlocal signcolumn=yes:2 conceallevel=2 concealcursor=nc nowrap")
+      vim.cmd("setlocal signcolumn=no conceallevel=2 concealcursor=nc wrap linebreak breakindent")
       vim.cmd([[setlocal showbreak=\│\ ]])
     end)
   end

@@ -303,8 +303,11 @@ local function ascii_art_for(b64, callback)
   f:write(raw); f:close()
   -- Block symbols + 16-color mode produces the densest, most recognizable
   -- ASCII rendering of a plot. We strip ANSI in post-processing.
+  -- --animate=off is critical: without it, chafa animates GIFs by emitting
+  -- many frames separated by clear-screen sequences, blowing up the line
+  -- count from ~32 to thousands.
   local cmd = string.format(
-    "chafa --format symbols --symbols block --size %dx%d --colors=16 %s 2>/dev/null",
+    "chafa --format symbols --symbols block --animate=off --size %dx%d --colors=16 %s 2>/dev/null",
     CHAFA_COLS, CHAFA_ROWS, vim.fn.shellescape(tmp_png))
   local result = vim.fn.system(cmd)
   pcall(os.remove, tmp_png)
@@ -353,10 +356,14 @@ local function ensure_png(b64, mime, callback)
   local f = io.open(in_path, "wb")
   if not f then callback(nil); return end
   f:write(raw); f:close()
+  -- ImageMagick's "[0]" first-frame selector must live INSIDE the shell
+  -- quotes. shellescape(in_path) wraps with single quotes, leaving "[0]"
+  -- outside the quotes where zsh tries to glob it and aborts the command.
+  local frame0 = vim.fn.shellescape(in_path .. "[0]")
+  local out_q = vim.fn.shellescape(out_path)
   local cmd = string.format(
-    "magick %s[0] %s 2>/dev/null || convert %s[0] %s 2>/dev/null",
-    vim.fn.shellescape(in_path), vim.fn.shellescape(out_path),
-    vim.fn.shellescape(in_path), vim.fn.shellescape(out_path))
+    "magick %s %s 2>/dev/null || convert %s %s 2>/dev/null",
+    frame0, out_q, frame0, out_q)
   vim.fn.system(cmd)
   pcall(os.remove, in_path)
   if vim.v.shell_error ~= 0 or vim.fn.filereadable(out_path) ~= 1 then
