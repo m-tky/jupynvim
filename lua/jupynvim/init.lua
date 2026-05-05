@@ -212,8 +212,7 @@ function M._populate_buffer(nb)
   -- continuation row. Right border on continuation rows is a known gap.
   for _, win in ipairs(vim.fn.win_findbuf(nb.buf)) do
     vim.api.nvim_win_call(win, function()
-      vim.cmd("setlocal signcolumn=no conceallevel=2 concealcursor=nc wrap linebreak breakindent")
-      vim.cmd([[setlocal showbreak=\│\ ]])
+      vim.cmd("setlocal signcolumn=no conceallevel=2 concealcursor=nc nowrap")
     end)
   end
 end
