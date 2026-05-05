@@ -371,13 +371,15 @@ local function render_cell(nb, cell, range, width, win)
     virt_lines = lines_below,
   })
 
-  -- Inline left bar + virt_text_win_col right bar cover unwrapped lines
-  -- and the first row of wrapped lines. eol_right_align covers the last
-  -- visual row of any wrapped line. Middle rows of 3+-row wraps are
-  -- covered by overlay marks added at redraw time by the decoration
-  -- provider M._decoration_provider, which uses screenpos (only valid
-  -- during a live redraw) to find the buffer column that wraps to each
-  -- intermediate row's rightmost screen col.
+  -- Borders. Inline `│ ` left + virt_text_win_col right cover unwrapped
+  -- lines and the first row of wrapped lines. eol_right_align covers the
+  -- last visual row. With nolinebreak (set in init.lua), wrap happens at
+  -- exactly width - 2 source cells per row (inline and showbreak each
+  -- take 2 cells), so the source virtcol at the end of visual row R is
+  -- R * (width - 2). For 3+-row wraps, place an overlay │ at that
+  -- buffer column for each intermediate row.
+  local content_w = math.max(width - 2, 1)
+  local buf_lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
   for ln = range.start, math.min(range.stop - 1, total - 1) do
     pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, 0, {
       virt_text = { { "│ ", HL_BORDER } },
@@ -397,6 +399,23 @@ local function render_cell(nb, cell, range, width, win)
       hl_mode = "combine",
       priority = 50,
     })
+    local line_text = buf_lines[ln + 1] or ""
+    local line_dw = vim.fn.strdisplaywidth(line_text)
+    if line_dw > 2 * content_w and #line_text > 0 then
+      local rows = math.ceil(line_dw / content_w)
+      for r = 2, rows - 1 do
+        local target_vcol = r * content_w
+        local ok, buf_col = pcall(vim.fn.virtcol2col, win, ln + 1, target_vcol)
+        if ok and type(buf_col) == "number" and buf_col > 0 and buf_col <= #line_text then
+          pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, buf_col - 1, {
+            virt_text = { { "│", HL_BORDER } },
+            virt_text_pos = "overlay",
+            hl_mode = "combine",
+            priority = 100,
+          })
+        end
+      end
+    end
   end
 
   -- Markdown cells: render styling + transmit embedded images
@@ -588,96 +607,8 @@ function M.refresh(nb, win)
   end)
 end
 
--- Decoration provider that places ephemeral overlay │ on each MIDDLE
--- visual row of a wrapped buffer line. Runs during live redraw so
--- screenpos returns the actual wrap layout (which depends on word
--- boundaries from linebreak, conceal, and other things we can't
--- determine from a static formula). For each long buffer line within
--- topline..botline, we walk every byte, ask screenpos which screen
--- row+col it ends up on, and record the byte that lands on the highest
--- screen col within each visual row. That byte gets an overlay │, which
--- replaces the source char visually with the border bar at the
--- rightmost screen col of that row. Skipping the first and last visual
--- rows because virt_text_win_col and eol_right_align already handle
--- those.
-local _decor_ns = vim.api.nvim_create_namespace("jupynvim.wrap_border")
-local _decor_set = false
-local function setup_decoration_provider()
-  if _decor_set then return end
-  _decor_set = true
-  -- Per-line cache keyed on (changedtick, line_byte_length, win_width).
-  -- Recomputed only when the line content or window changes; consumed by
-  -- on_line during each redraw without re-walking screenpos.
-  local cache = {}
-  local function compute_middle_cols(winid, bufnr, ln, total)
-    local line = vim.api.nvim_buf_get_lines(bufnr, ln, ln + 1, false)[1] or ""
-    if line == Notebook.CELL_SEP or #line == 0 then return nil end
-    if vim.fn.strdisplaywidth(line) + 2 <= total then return nil end
-    -- Walk bytes, tracking max curscol per visual row. curscol respects
-    -- inline virt_text shifts where col does not, per the diagnostic
-    -- showing col=6 vs curscol=8 for buf col 1 of an inline-shifted line.
-    local row_max = {}
-    for ci = 1, #line do
-      local sp = vim.fn.screenpos(winid, ln + 1, ci)
-      if sp and sp.row and sp.row > 0 then
-        local key_col = sp.curscol or sp.col
-        local rec = row_max[sp.row]
-        if not rec or key_col > rec.col then
-          row_max[sp.row] = { col = key_col, buf_col = ci }
-        end
-      end
-    end
-    local rows_sorted = {}
-    for r in pairs(row_max) do table.insert(rows_sorted, r) end
-    table.sort(rows_sorted)
-    local out = {}
-    for i = 2, #rows_sorted - 1 do
-      local rec = row_max[rows_sorted[i]]
-      if rec and rec.buf_col >= 1 and rec.buf_col <= #line then
-        table.insert(out, rec.buf_col - 1)
-      end
-    end
-    return out
-  end
-
-  vim.api.nvim_set_decoration_provider(_decor_ns, {
-    on_win = function(_, winid, bufnr, topline, botline)
-      if not Notebook.get(bufnr) then return false end
-      local tick = vim.api.nvim_buf_get_changedtick(bufnr)
-      local total = vim.api.nvim_win_get_width(winid)
-      local entry = cache[bufnr]
-      if not entry or entry.tick ~= tick or entry.total ~= total then
-        cache[bufnr] = { tick = tick, total = total, lines = {} }
-      end
-      local last = math.min(botline + 5, vim.api.nvim_buf_line_count(bufnr) - 1)
-      for ln = topline, last do
-        if cache[bufnr].lines[ln] == nil then
-          cache[bufnr].lines[ln] = compute_middle_cols(winid, bufnr, ln, total) or false
-        end
-      end
-      return true
-    end,
-    on_line = function(_, _, bufnr, row)
-      local entry = cache[bufnr]
-      if not entry then return end
-      local cols = entry.lines[row]
-      if not cols then return end
-      for _, col in ipairs(cols) do
-        pcall(vim.api.nvim_buf_set_extmark, bufnr, _decor_ns, row, col, {
-          virt_text = { { "│", HL_BORDER } },
-          virt_text_pos = "overlay",
-          hl_mode = "combine",
-          priority = 100,
-          ephemeral = true,
-        })
-      end
-    end,
-  })
-end
-
 function M.setup_highlights()
   local hl = vim.api.nvim_set_hl
-  setup_decoration_provider()
   hl(0, HL_BORDER,    { fg = "#7aa2f7" })
   hl(0, HL_HEADER,    { fg = "#7aa2f7", bold = true })
   hl(0, HL_BUSY,      { fg = "#e0af68", bold = true })
