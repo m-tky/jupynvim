@@ -517,14 +517,37 @@ function M.refresh(nb, win)
     local width = 80
     if win and vim.api.nvim_win_is_valid(win) then
       local total = vim.api.nvim_win_get_width(win)
-      -- Ask Neovim where buffer column 1 actually renders on screen.
-      -- screenpos accounts for sign column, line number column (with
-      -- auto-expansion), fold column, and any other gutter widgets,
-      -- which is more reliable than recomputing them manually. The
-      -- gutter is the screen columns left of where buffer text starts.
-      local sp = vim.fn.screenpos(win, 1, 1)
-      local gutter = (sp and sp.col and sp.col > 0) and (sp.col - 1) or 0
-      width = math.max(total - gutter, 40)
+      -- signcolumn: yes:N or auto:N → 2*N cells, plain yes/auto → 2.
+      local sc = vim.api.nvim_get_option_value("signcolumn", { win = win })
+      local sc_w = 0
+      if type(sc) == "string" then
+        local m = sc:match("^yes:(%d+)$") or sc:match("^auto:(%d+)$")
+        if m then sc_w = 2 * tonumber(m)
+        elseif sc == "yes" or sc == "auto" then sc_w = 2 end
+      end
+      -- numbercolumn. numberwidth is the minimum, but the displayed
+      -- column auto-expands to fit the largest line number plus a
+      -- trailing space. for a 1014-line buffer that is 5 even though
+      -- numberwidth is 4. relying on numberwidth alone puts the right
+      -- border one cell past the visible window edge.
+      local has_num = vim.api.nvim_get_option_value("number", { win = win })
+      local has_rnum = vim.api.nvim_get_option_value("relativenumber", { win = win })
+      local nu_w = 0
+      if has_num or has_rnum then
+        local nuw_opt = vim.api.nvim_get_option_value("numberwidth", { win = win })
+        local min_nuw = (type(nuw_opt) == "number") and nuw_opt or 4
+        local digits = #tostring(vim.api.nvim_buf_line_count(buf))
+        nu_w = math.max(min_nuw, digits + 1)
+      end
+      -- foldcolumn can be "0", "1"..."9", "auto", or "auto:N".
+      local fc = vim.api.nvim_get_option_value("foldcolumn", { win = win })
+      local fc_w = 0
+      if type(fc) == "string" then
+        local m = fc:match("^auto:(%d+)$") or fc:match("^(%d+)$")
+        if m then fc_w = tonumber(m)
+        elseif fc == "auto" then fc_w = 1 end
+      end
+      width = math.max(total - sc_w - nu_w - fc_w, 40)
     end
 
     for i, r in ipairs(ranges) do
