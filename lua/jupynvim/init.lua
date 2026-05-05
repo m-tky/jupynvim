@@ -159,17 +159,25 @@ function M.open(path, opts)
   -- Create or reuse the buffer
   local buf = vim.fn.bufnr(abs, true)
   vim.api.nvim_buf_set_name(buf, abs)
-  -- Leave buftype empty (instead of acwrite or nofile) so LSP, formatters,
-  -- and copilot treat this like a regular source file. BufWriteCmd still
-  -- intercepts :w so our save path serialises cells via the backend
-  -- rather than dumping the visible buffer text to disk. We use the
-  -- modern set_option_value API and reapply in autocmds because some
-  -- plugins (e.g. LazyVim-style buffer setup) clobber buftype on
-  -- BufNewFile or FileType.
-  vim.api.nvim_set_option_value("buftype", "", { buf = buf })
+  -- acwrite forces :w through our BufWriteCmd. With "" Neovim sometimes
+  -- falls through to native write that dumps the visible cell-rendered
+  -- text to disk, breaking save. We compensate for LSPs that skip
+  -- non-empty buftype by re-firing FileType (and LspStart if available)
+  -- after acwrite is set.
+  vim.api.nvim_set_option_value("buftype", "acwrite", { buf = buf })
   vim.api.nvim_buf_set_option(buf, "swapfile", false)
   vim.api.nvim_buf_set_option(buf, "modifiable", true)
-  vim.api.nvim_buf_set_option(buf, "filetype", language_filetype(snap))
+  local ft = language_filetype(snap)
+  vim.api.nvim_buf_set_option(buf, "filetype", ft)
+  -- Some LSPs and formatters cache the first FileType event and skip
+  -- non-empty buftype values. Force a second FileType pass and ask
+  -- nvim-lspconfig (if loaded) to attach the matching server here.
+  vim.schedule(function()
+    if vim.api.nvim_buf_is_valid(buf) then
+      vim.api.nvim_exec_autocmds("FileType", { buffer = buf, modeline = false })
+      pcall(vim.cmd, "LspStart")
+    end
+  end)
 
   local nb = Notebook.create(buf, abs, sid, snap)
   M._populate_buffer(nb)
@@ -229,16 +237,11 @@ function M._attach_autocmds(buf)
   local group = vim.api.nvim_create_augroup("Jupynvim_" .. buf, { clear = true })
 
   -- Force window options + close duplicates whenever the notebook buf appears.
-  -- Also reassert buftype="" on every entry so plugins that set nofile
-  -- (LazyVim, mini.bufremove, etc) can't break LSP/copilot attachment.
-  vim.api.nvim_create_autocmd({ "BufWinEnter", "WinNew", "WinEnter", "FileType", "BufEnter" }, {
+  vim.api.nvim_create_autocmd({ "BufWinEnter", "WinNew", "WinEnter" }, {
     group = group, buffer = buf,
     callback = function()
       vim.schedule(function()
         if not vim.api.nvim_buf_is_valid(buf) then return end
-        if vim.bo[buf].buftype ~= "" then
-          pcall(vim.api.nvim_set_option_value, "buftype", "", { buf = buf })
-        end
         local wins = vim.fn.win_findbuf(buf)
         for _, win in ipairs(wins) do
           vim.api.nvim_win_call(win, function()
