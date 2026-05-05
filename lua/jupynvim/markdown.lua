@@ -290,24 +290,14 @@ local function apply_line(buf, ns, lnum, raw)
     inline_styling(buf, ns, lnum, raw)
     return
   end
-  -- Embedded image placeholder: ![alt](jupynvim-img:N) — show "📷 alt" instead
+  -- Embedded image placeholder: ![alt](jupynvim-img:N) — fully conceal so
+  -- the cell shows just the rendered image below, like VSCode does.
   if raw:match("!%[[^%]]*%]%(jupynvim%-img:%d+%)") then
-    local s = 1
-    while true do
-      local a, b, alt = raw:find("!%[([^%]]*)%]%(jupynvim%-img:%d+%)", s)
-      if not a then break end
-      set_mark(buf, ns, lnum, a - 1, {
-        end_col = b,
-        conceal = "",
-        priority = 200,
-      })
-      set_mark(buf, ns, lnum, a - 1, {
-        virt_text = { { "📷 " .. (alt or "image"), HL.Link } },
-        virt_text_pos = "inline",
-        priority = 199,
-      })
-      s = b + 1
-    end
+    set_mark(buf, ns, lnum, 0, {
+      end_col = #raw,
+      conceal = "",
+      priority = 200,
+    })
     return
   end
 
