@@ -168,15 +168,18 @@ function M.open(path, opts)
   vim.api.nvim_buf_set_option(buf, "swapfile", false)
   vim.api.nvim_buf_set_option(buf, "modifiable", true)
   local ft = language_filetype(snap)
-  vim.api.nvim_buf_set_option(buf, "filetype", ft)
-  -- Re-fire the autocmds plugins typically use to attach: BufRead,
-  -- BufReadPost (Mason/lspconfig hook into these), then FileType.
-  -- LspStart is nvim-lspconfig specific; not all setups have it but
-  -- the pcall makes that a no-op.
+  -- Neovim's default filetype detection maps .ipynb to json (the file
+  -- IS json on disk). We want python (or whatever the kernelspec
+  -- language is) so LSP/copilot/treesitter treat the buffer as code.
+  -- Set filetype AFTER firing BufRead/BufReadPost so anything those
+  -- handlers do can't clobber us, then reassert on BufEnter just in
+  -- case some plugin re-detects later.
+  vim.b[buf].jupynvim_filetype = ft
   vim.schedule(function()
     if not vim.api.nvim_buf_is_valid(buf) then return end
     vim.api.nvim_exec_autocmds("BufRead", { buffer = buf, modeline = false })
     vim.api.nvim_exec_autocmds("BufReadPost", { buffer = buf, modeline = false })
+    vim.bo[buf].filetype = ft
     vim.api.nvim_exec_autocmds("FileType", { buffer = buf, modeline = false })
     pcall(vim.cmd, "LspStart")
   end)
@@ -238,12 +241,18 @@ end
 function M._attach_autocmds(buf)
   local group = vim.api.nvim_create_augroup("Jupynvim_" .. buf, { clear = true })
 
-  -- Force window options + close duplicates whenever the notebook buf appears.
-  vim.api.nvim_create_autocmd({ "BufWinEnter", "WinNew", "WinEnter" }, {
+  -- Force window options + close duplicates whenever the notebook buf
+  -- appears. Also reassert the kernel-language filetype if anything
+  -- knocked it back to json (Neovim's default for .ipynb).
+  vim.api.nvim_create_autocmd({ "BufWinEnter", "WinNew", "WinEnter", "BufEnter" }, {
     group = group, buffer = buf,
     callback = function()
       vim.schedule(function()
         if not vim.api.nvim_buf_is_valid(buf) then return end
+        local want_ft = vim.b[buf].jupynvim_filetype or "python"
+        if vim.bo[buf].filetype ~= want_ft then
+          vim.bo[buf].filetype = want_ft
+        end
         local wins = vim.fn.win_findbuf(buf)
         for _, win in ipairs(wins) do
           vim.api.nvim_win_call(win, function()
