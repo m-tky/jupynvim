@@ -240,6 +240,20 @@ function M._populate_buffer(nb)
   vim.api.nvim_buf_set_option(nb.buf, "modifiable", true)
   vim.api.nvim_buf_set_lines(nb.buf, 0, -1, false, lines)
   vim.api.nvim_buf_set_option(nb.buf, "modified", false)
+  -- Pre-conceal cell separator marker lines synchronously, before the
+  -- debounced Render.refresh runs. Without this, the literal
+  -- "# %%[jupynvim:cell-sep]" text flashes visible on screen for one or
+  -- two redraw frames between buffer population and the first render.
+  local sep = require("jupynvim.notebook").CELL_SEP
+  for i, line in ipairs(lines) do
+    if line == sep then
+      pcall(vim.api.nvim_buf_set_extmark, nb.buf, nb.border_ns, i - 1, 0, {
+        end_col = #line,
+        conceal = "",
+        priority = 200,
+      })
+    end
+  end
   -- wrap=true with linebreak + breakindent gives word-wrapped editing for
   -- long content. showbreak="│ " keeps the left border visible on every
   -- continuation row. Right border on continuation rows is a known gap.
