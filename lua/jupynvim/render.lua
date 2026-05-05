@@ -132,6 +132,34 @@ local function strip_ansi(s)
   return s
 end
 
+-- Expand tabs to spaces so wrap and with_sides compute the same width
+-- that virt_text actually renders. virt_text doesn't honour tabstop,
+-- so a literal "\t" in chunk text shows as one cell while strdisplaywidth
+-- reports eight, leaving the right border shifted left by seven cells
+-- on every tab. This is what made the !ls output rows in code cells
+-- have a ragged right edge.
+local function expand_tabs(s, tabstop)
+  tabstop = tabstop or 8
+  local out, col = {}, 0
+  local i = 1
+  while i <= #s do
+    local c = s:sub(i, i)
+    if c == "\t" then
+      local pad = tabstop - (col % tabstop)
+      table.insert(out, string.rep(" ", pad))
+      col = col + pad
+    elseif c == "\n" then
+      table.insert(out, c)
+      col = 0
+    else
+      table.insert(out, c)
+      col = col + 1
+    end
+    i = i + 1
+  end
+  return table.concat(out)
+end
+
 -- Apply tqdm/progress-bar carriage-return semantics: \r OVERWRITES the
 -- current line. Each \r-terminated chunk is replaced; only the LAST chunk
 -- per logical line is kept. Then split by real newlines.
@@ -169,7 +197,7 @@ local function build_output_virt_lines(cell, width, nb)
       -- stderr is rendered in subdued gray (HL_OUTPUT) instead of bright red
       -- so tqdm/wandb output (most common stderr) doesn't visually scream.
       local hl = (o.name == "stderr") and HL_OUTPUT or HL_STREAM
-      local text = strip_ansi(process_cr(as_str(o.text)))
+      local text = expand_tabs(strip_ansi(process_cr(as_str(o.text))))
       for _, line in ipairs(vim.split(text, "\n", { plain = true })) do
         line = compact_tqdm(line)
         for _, w in ipairs(wrap(line, width - 4)) do
@@ -206,6 +234,7 @@ local function build_output_virt_lines(cell, width, nb)
         end
       end
       if text ~= "" then
+        text = expand_tabs(text)
         for _, line in ipairs(vim.split(text, "\n", { plain = true })) do
           for _, w in ipairs(wrap(line, width - 4)) do
             table.insert(rows, with_sides(w, HL_RESULT, width))
@@ -248,7 +277,7 @@ local function build_output_virt_lines(cell, width, nb)
         table.insert(rows, with_sides(w, HL_ERROR, width))
       end
       for _, tb in ipairs(o.traceback or {}) do
-        local plain = as_str(tb):gsub("\27%[[%d;]*m", "")
+        local plain = expand_tabs(as_str(tb):gsub("\27%[[%d;]*m", ""))
         for _, line in ipairs(vim.split(plain, "\n", { plain = true })) do
           for _, w in ipairs(wrap(line, width - 4)) do
             table.insert(rows, with_sides(w, HL_ERROR, width))
