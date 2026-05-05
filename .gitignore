@@ -16,9 +16,8 @@ __pycache__/
 .idea/
 .vscode/
 
-# Override global ignore so the project-level claude context ships with the repo.
-!.claude/
-!.claude/**
+# AI assistant context — kept locally, not published.
+.claude/
 
 # Logs
 *.log
