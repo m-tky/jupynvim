@@ -336,14 +336,13 @@ local function render_cell(nb, cell, range, width, win)
 
   -- Both borders live in the text area at fixed columns so they line up
   -- with the ┌ ┐ ├ ┤ └ ┘ glyphs in the header, divider, and footer
-  -- (all at columns 0 and width-1).
+  -- (all at columns 0 and width-1). The right bar uses virt_text_win_col
+  -- so it pins to a fixed text-area column. Stacking right_align on top
+  -- of it produced doubled-up bars that drifted past the rightmost cell
+  -- on long lines, which is what made every notebook look goofy.
   --
-  -- The right bar is placed twice. virt_text_win_col=width-1 lands on the
-  -- first visual row of a wrapped line, and right_align lands on the last
-  -- visual row. For unwrapped lines they collapse onto the same row and
-  -- show as one bar. For lines wrapping to two visual rows both rows get
-  -- a right bar. Lines wrapping to three or more rows still have a gap
-  -- on the middle rows; Neovim has no API for per-visual-row marks.
+  -- Wrapped continuation rows still lose the right bar. Neovim has no
+  -- API for placing virt_text on every visual row of a wrapped line.
   for ln = range.start, math.min(range.stop - 1, total - 1) do
     pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, 0, {
       virt_text = { { "│ ", HL_BORDER } },
@@ -354,12 +353,6 @@ local function render_cell(nb, cell, range, width, win)
     pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, 0, {
       virt_text = { { "│", HL_BORDER } },
       virt_text_win_col = width - 1,
-      hl_mode = "combine",
-      priority = 100,
-    })
-    pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, 0, {
-      virt_text = { { "│", HL_BORDER } },
-      virt_text_pos = "right_align",
       hl_mode = "combine",
       priority = 100,
     })

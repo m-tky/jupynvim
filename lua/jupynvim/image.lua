@@ -355,35 +355,43 @@ local function extract_gif_frames(b64)
   local delays = {}
   for d in delays_str:gmatch("(%d+)") do
     local ms = tonumber(d) * 10
+    -- gif T is in centiseconds. T=0 means "as fast as possible" which
+    -- browsers and VSCode interpret as ~100ms. apply the same default.
     if ms < 20 then ms = 100 end
     table.insert(delays, ms)
   end
 
-  -- Cap frame count so a 1000-frame gif doesn't lock up the editor.
-  local MAX_FRAMES = 60
-  local n = math.min(frame_count, MAX_FRAMES)
+  -- Single-call extraction with -coalesce. one shell-out instead of N,
+  -- and -coalesce flattens disposal/disposal-restore so each frame is
+  -- the full composited picture rather than a delta from the previous.
+  local out_pattern = vim.fn.tempname()
+  local cmd = string.format(
+    "magick %s -coalesce %s 2>/dev/null",
+    in_q, vim.fn.shellescape(out_pattern .. "_%04d.png"))
+  vim.fn.system(cmd)
+  pcall(os.remove, in_path)
+
+  -- 500 frame upper bound keeps memory and extraction time bounded for
+  -- pathological gifs, but allows real animations (commonly 100-200 frames)
+  -- to play at their native loop length so they look the same as VSCode.
+  local MAX_FRAMES = 500
   local frames = {}
-  for i = 0, n - 1 do
-    local out_path = vim.fn.tempname() .. ".png"
-    -- -coalesce flattens disposal/disposal-restore so each frame is the full
-    -- composited picture, not a delta against the previous frame.
-    local cmd = string.format(
-      "magick %s -coalesce %s 2>/dev/null",
-      vim.fn.shellescape(in_path .. "[" .. i .. "]"),
-      vim.fn.shellescape(out_path))
-    vim.fn.system(cmd)
-    if vim.fn.filereadable(out_path) ~= 1 then
-      pcall(os.remove, in_path)
-      return nil
-    end
-    local pf = io.open(out_path, "rb")
+  for i = 0, math.min(frame_count, MAX_FRAMES) - 1 do
+    local p = string.format("%s_%04d.png", out_pattern, i)
+    if vim.fn.filereadable(p) ~= 1 then break end
+    local pf = io.open(p, "rb")
     local png_bytes = pf:read("*a")
     pf:close()
-    pcall(os.remove, out_path)
+    pcall(os.remove, p)
     table.insert(frames, vim.base64.encode(png_bytes))
   end
-  pcall(os.remove, in_path)
-  log.info(string.format("extract_gif_frames: %d frames extracted", #frames))
+  -- Clean up any remaining frames past the cap.
+  for i = MAX_FRAMES, frame_count - 1 do
+    pcall(os.remove, string.format("%s_%04d.png", out_pattern, i))
+  end
+  if #frames < 2 then return nil end
+  log.info(string.format("extract_gif_frames: %d frames, total loop %dms", #frames,
+    (function() local s = 0; for _, d in ipairs(delays) do s = s + d end; return s end)()))
   return { frames = frames, delays = delays }
 end
 
