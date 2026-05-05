@@ -374,13 +374,13 @@ local function render_cell(nb, cell, range, width, win)
   -- Right bar on every visual row of a wrapped line. virt_text_win_col
   -- covers the first visual row, eol_right_align covers the last. For
   -- 3+-row wraps, place an overlay │ at each intermediate wrap point.
-  -- The wrap point on visual row R for a line that gets two cells of
-  -- inline `│ ` prefix is at virtual column R * (width - 2) within the
-  -- buffer line. virtcol2col converts that to a buffer byte column that
-  -- we attach overlay to. with linebreak=true the wrap lands at a word
-  -- boundary near that column and the displaced character is whitespace.
+  -- Inline `│ ` only takes two cells on the FIRST visual row. Rows 2..N
+  -- carry full `width` cells of source. So the source virtcol at the end
+  -- of visual row R is (width - 2) + (R - 1) * width = R * width - 2.
+  -- virtcol2col converts that virtcol to a buffer byte col; an overlay
+  -- there lands on the rightmost screen col of row R. linebreak=true
+  -- means the displaced char is whitespace.
   local buf_lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-  local content_w = math.max(width - 2, 1)
   for ln = range.start, math.min(range.stop - 1, total - 1) do
     pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, 0, {
       virt_text = { { "│ ", HL_BORDER } },
@@ -403,13 +403,10 @@ local function render_cell(nb, cell, range, width, win)
     local line_text = buf_lines[ln + 1] or ""
     local line_dw = vim.fn.strdisplaywidth(line_text)
     if line_dw + 2 > 2 * width and #line_text > 0 then
-      -- Line wraps to 3+ visual rows. Estimate visual row count and place
-      -- overlay │ on each intermediate row (skipping first and last,
-      -- which are handled by win_col and eol_right_align).
       local rows = math.floor((line_dw + 2) / width) + 1
       if (line_dw + 2) % width == 0 then rows = rows - 1 end
       for r = 2, rows - 1 do
-        local target_vcol = r * content_w
+        local target_vcol = r * width - 2
         local ok, buf_col = pcall(vim.fn.virtcol2col, win, ln + 1, target_vcol)
         if ok and type(buf_col) == "number" and buf_col > 0 then
           pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, buf_col - 1, {
