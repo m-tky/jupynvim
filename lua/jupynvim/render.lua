@@ -605,53 +605,62 @@ local _decor_set = false
 local function setup_decoration_provider()
   if _decor_set then return end
   _decor_set = true
-  -- Use a state cache populated by on_win and consumed by on_line so we
-  -- can compute the wrap layout up-front for a window's visible range and
-  -- then attach ephemeral marks per-line as Neovim redraws each one.
-  local wrap_cache = {}
-  vim.api.nvim_set_decoration_provider(_decor_ns, {
-    on_win = function(_, winid, bufnr, topline, botline)
-      wrap_cache[bufnr] = nil
-      local nb = Notebook.get(bufnr)
-      if not nb then return false end
-      local total = vim.api.nvim_win_get_width(winid)
-      local last = math.min(botline + 5, vim.api.nvim_buf_line_count(bufnr) - 1)
-      local lines = vim.api.nvim_buf_get_lines(bufnr, topline, last + 1, false)
-      local per_buf = {}
-      for offset, line in ipairs(lines) do
-        local ln = topline + offset - 1
-        if line ~= Notebook.CELL_SEP and #line > 0
-           and vim.fn.strdisplaywidth(line) + 2 > total then
-          local row_max = {}
-          for ci = 1, #line do
-            local sp = vim.fn.screenpos(winid, ln + 1, ci)
-            if sp and sp.row and sp.row > 0 then
-              local rec = row_max[sp.row]
-              if not rec or sp.col > rec.col then
-                row_max[sp.row] = { col = sp.col, buf_col = ci }
-              end
-            end
-          end
-          local rows_sorted = {}
-          for r in pairs(row_max) do table.insert(rows_sorted, r) end
-          table.sort(rows_sorted)
-          local middle_cols = {}
-          for i = 2, #rows_sorted - 1 do
-            local rec = row_max[rows_sorted[i]]
-            if rec and rec.buf_col >= 1 and rec.buf_col <= #line then
-              table.insert(middle_cols, rec.buf_col - 1)
-            end
-          end
-          if #middle_cols > 0 then per_buf[ln] = middle_cols end
+  -- Per-line cache keyed on (changedtick, line_byte_length, win_width).
+  -- Recomputed only when the line content or window changes; consumed by
+  -- on_line during each redraw without re-walking screenpos.
+  local cache = {}
+  local function compute_middle_cols(winid, bufnr, ln, total)
+    local line = vim.api.nvim_buf_get_lines(bufnr, ln, ln + 1, false)[1] or ""
+    if line == Notebook.CELL_SEP or #line == 0 then return nil end
+    if vim.fn.strdisplaywidth(line) + 2 <= total then return nil end
+    -- Walk bytes, tracking max curscol per visual row. curscol respects
+    -- inline virt_text shifts where col does not, per the diagnostic
+    -- showing col=6 vs curscol=8 for buf col 1 of an inline-shifted line.
+    local row_max = {}
+    for ci = 1, #line do
+      local sp = vim.fn.screenpos(winid, ln + 1, ci)
+      if sp and sp.row and sp.row > 0 then
+        local key_col = sp.curscol or sp.col
+        local rec = row_max[sp.row]
+        if not rec or key_col > rec.col then
+          row_max[sp.row] = { col = key_col, buf_col = ci }
         end
       end
-      wrap_cache[bufnr] = per_buf
+    end
+    local rows_sorted = {}
+    for r in pairs(row_max) do table.insert(rows_sorted, r) end
+    table.sort(rows_sorted)
+    local out = {}
+    for i = 2, #rows_sorted - 1 do
+      local rec = row_max[rows_sorted[i]]
+      if rec and rec.buf_col >= 1 and rec.buf_col <= #line then
+        table.insert(out, rec.buf_col - 1)
+      end
+    end
+    return out
+  end
+
+  vim.api.nvim_set_decoration_provider(_decor_ns, {
+    on_win = function(_, winid, bufnr, topline, botline)
+      if not Notebook.get(bufnr) then return false end
+      local tick = vim.api.nvim_buf_get_changedtick(bufnr)
+      local total = vim.api.nvim_win_get_width(winid)
+      local entry = cache[bufnr]
+      if not entry or entry.tick ~= tick or entry.total ~= total then
+        cache[bufnr] = { tick = tick, total = total, lines = {} }
+      end
+      local last = math.min(botline + 5, vim.api.nvim_buf_line_count(bufnr) - 1)
+      for ln = topline, last do
+        if cache[bufnr].lines[ln] == nil then
+          cache[bufnr].lines[ln] = compute_middle_cols(winid, bufnr, ln, total) or false
+        end
+      end
       return true
     end,
     on_line = function(_, _, bufnr, row)
-      local per_buf = wrap_cache[bufnr]
-      if not per_buf then return end
-      local cols = per_buf[row]
+      local entry = cache[bufnr]
+      if not entry then return end
+      local cols = entry.lines[row]
       if not cols then return end
       for _, col in ipairs(cols) do
         pcall(vim.api.nvim_buf_set_extmark, bufnr, _decor_ns, row, col, {
