@@ -81,6 +81,19 @@ function M._handle_cell_event(p)
   for buf, nb in pairs(Notebook.all()) do
     if nb.session_id == p.session_id then
       nb:apply_cell_event(p.cell_id, p.event or {})
+      -- Output events change cell.outputs but not buffer TEXT, so vim's
+      -- "modified" flag stays false. That's why :wqa was a no-op after
+      -- running a cell - vim skipped :w because the buffer looked
+      -- unchanged. Mark modified so :w / :wqa trigger BufWriteCmd.
+      local ek = p.event and p.event.kind
+      if ek == "execute_input" or ek == "stream" or ek == "execute_result"
+         or ek == "display_data" or ek == "error" or ek == "clear_output" then
+        vim.schedule(function()
+          if vim.api.nvim_buf_is_valid(buf) then
+            vim.bo[buf].modified = true
+          end
+        end)
+      end
       -- EAGER image transmission — must use the SAME renderer as the active
       -- config so the cache entry matches what render_cell expects.
       local ev = p.event or {}
@@ -601,6 +614,8 @@ function M.clear_outputs(buf)
   -- reset even if the backend RPC is missing (older binary). The backend
   -- call is best-effort; on success the on-disk state will match too.
   Render.refresh(nb, vim.fn.bufwinid(buf))
+  -- Mark buffer modified so :w / :wqa actually trigger BufWriteCmd.
+  vim.bo[buf].modified = true
   ensure_client():call("clear_outputs", { session_id = nb.session_id }, function(err)
     if err then
       vim.schedule(function()
@@ -632,6 +647,7 @@ function M.clear_cell_output(buf)
   nb.image_ids = nb.image_ids or {}
   nb.image_ids[cell.id] = nil
   Render.refresh(nb, vim.fn.bufwinid(buf))
+  vim.bo[buf].modified = true
   ensure_client():call("clear_cell_output",
     { session_id = nb.session_id, cell_id = cell.id }, function(err)
     if err then
