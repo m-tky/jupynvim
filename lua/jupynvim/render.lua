@@ -588,67 +588,8 @@ function M.refresh(nb, win)
   end)
 end
 
--- Decoration provider: at redraw time, walk visible buffer lines that
--- wrap to 3+ visual rows and add ephemeral overlay │ at each middle
--- row's rightmost screen col. screenpos is only reliable during live
--- redraw, so this work has to happen here instead of in M.refresh.
-local _decor_ns = vim.api.nvim_create_namespace("jupynvim.wrap_border")
-local _decor_set = false
-local function setup_decoration_provider()
-  if _decor_set then return end
-  _decor_set = true
-  local Notebook = require("jupynvim.notebook")
-  vim.api.nvim_set_decoration_provider(_decor_ns, {
-    on_win = function(_, winid, bufnr, topline, botline_guess)
-      local nb = Notebook.get(bufnr)
-      if not nb then return false end
-      local total = vim.api.nvim_win_get_width(winid)
-      local botline = math.min(botline_guess + 5, vim.api.nvim_buf_line_count(bufnr) - 1)
-      local lines = vim.api.nvim_buf_get_lines(bufnr, topline, botline + 1, false)
-      for offset, line in ipairs(lines) do
-        local ln = topline + offset - 1
-        if line ~= Notebook.CELL_SEP and #line > 0 then
-          if vim.fn.strdisplaywidth(line) + 2 > total then
-            local row_to_buf_col = {}
-            local prev_row = nil
-            for ci = 1, #line do
-              local sp = vim.fn.screenpos(winid, ln + 1, ci)
-              if sp and sp.row and sp.row > 0 then
-                if prev_row and sp.row > prev_row then
-                  row_to_buf_col[prev_row] = ci - 1
-                end
-                prev_row = sp.row
-              end
-            end
-            local rows_sorted = {}
-            for r in pairs(row_to_buf_col) do table.insert(rows_sorted, r) end
-            table.sort(rows_sorted)
-            -- Skip first row (covered by virt_text_win_col) and the
-            -- final mapped row's successor (last row covered by
-            -- eol_right_align). Middle rows get overlay.
-            for i = 1, #rows_sorted - 1 do
-              local buf_col = row_to_buf_col[rows_sorted[i]]
-              if buf_col and buf_col > 0 then
-                pcall(vim.api.nvim_buf_set_extmark, bufnr, _decor_ns, ln, buf_col - 1, {
-                  virt_text = { { "│", HL_BORDER } },
-                  virt_text_pos = "overlay",
-                  hl_mode = "combine",
-                  priority = 100,
-                  ephemeral = true,
-                })
-              end
-            end
-          end
-        end
-      end
-      return false
-    end,
-  })
-end
-
 function M.setup_highlights()
   local hl = vim.api.nvim_set_hl
-  setup_decoration_provider()
   hl(0, HL_BORDER,    { fg = "#7aa2f7" })
   hl(0, HL_HEADER,    { fg = "#7aa2f7", bold = true })
   hl(0, HL_BUSY,      { fg = "#e0af68", bold = true })
