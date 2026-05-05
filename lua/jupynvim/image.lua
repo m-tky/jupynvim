@@ -333,21 +333,27 @@ local PLACEHOLDER_ROWS, PLACEHOLDER_COLS = 32, 96
 -- the kitty animation protocol (a=f / a=a / a=c return "unimplemented action").
 -- We re-transmit each frame with the same image_id; Ghostty replaces the
 -- image on retransmit and the placeholders on screen refresh automatically.
-local function extract_gif_frames(b64)
+-- Asynchronously decompose an animated GIF into a sequence of PNG frames
+-- plus per-frame delays. Calls callback({ frames = ..., delays = ... })
+-- on success or callback(nil) on failure. Uses vim.system so the editor
+-- doesn't block on the multi-frame extraction (~1.9s for a 189-frame gif).
+local MAX_ANIM_FRAMES = 500
+local function extract_gif_frames_async(b64, callback)
   local raw_ok, raw = pcall(vim.base64.decode, b64)
-  if not raw_ok or not raw then return nil end
+  if not raw_ok or not raw then callback(nil); return end
   local in_path = vim.fn.tempname() .. ".gif"
   local f = io.open(in_path, "wb")
-  if not f then return nil end
+  if not f then callback(nil); return end
   f:write(raw); f:close()
   local in_q = vim.fn.shellescape(in_path)
 
+  -- frame count and delays are tiny `identify` calls. fine to run sync.
   local fc_str = vim.fn.system(string.format(
     "magick identify -format '%%n ' %s 2>/dev/null", in_q))
   local frame_count = tonumber(fc_str:match("^%s*(%d+)")) or 1
   if frame_count <= 1 then
     pcall(os.remove, in_path)
-    return nil
+    callback(nil); return
   end
 
   local delays_str = vim.fn.system(string.format(
@@ -361,38 +367,36 @@ local function extract_gif_frames(b64)
     table.insert(delays, ms)
   end
 
-  -- Single-call extraction with -coalesce. one shell-out instead of N,
-  -- and -coalesce flattens disposal/disposal-restore so each frame is
-  -- the full composited picture rather than a delta from the previous.
+  -- Frame extraction is the slow part. -coalesce flattens disposal so each
+  -- frame is the full composited picture, not a delta from the previous.
   local out_pattern = vim.fn.tempname()
-  local cmd = string.format(
-    "magick %s -coalesce %s 2>/dev/null",
-    in_q, vim.fn.shellescape(out_pattern .. "_%04d.png"))
-  vim.fn.system(cmd)
-  pcall(os.remove, in_path)
-
-  -- 500 frame upper bound keeps memory and extraction time bounded for
-  -- pathological gifs, but allows real animations (commonly 100-200 frames)
-  -- to play at their native loop length so they look the same as VSCode.
-  local MAX_FRAMES = 500
-  local frames = {}
-  for i = 0, math.min(frame_count, MAX_FRAMES) - 1 do
-    local p = string.format("%s_%04d.png", out_pattern, i)
-    if vim.fn.filereadable(p) ~= 1 then break end
-    local pf = io.open(p, "rb")
-    local png_bytes = pf:read("*a")
-    pf:close()
-    pcall(os.remove, p)
-    table.insert(frames, vim.base64.encode(png_bytes))
-  end
-  -- Clean up any remaining frames past the cap.
-  for i = MAX_FRAMES, frame_count - 1 do
-    pcall(os.remove, string.format("%s_%04d.png", out_pattern, i))
-  end
-  if #frames < 2 then return nil end
-  log.info(string.format("extract_gif_frames: %d frames, total loop %dms", #frames,
-    (function() local s = 0; for _, d in ipairs(delays) do s = s + d end; return s end)()))
-  return { frames = frames, delays = delays }
+  local out_glob = out_pattern .. "_%04d.png"
+  vim.system(
+    { "sh", "-c", string.format("magick %s -coalesce %s 2>/dev/null",
+        in_q, vim.fn.shellescape(out_glob)) },
+    { text = false },
+    vim.schedule_wrap(function()
+      pcall(os.remove, in_path)
+      local frames = {}
+      for i = 0, math.min(frame_count, MAX_ANIM_FRAMES) - 1 do
+        local p = string.format("%s_%04d.png", out_pattern, i)
+        if vim.fn.filereadable(p) ~= 1 then break end
+        local pf = io.open(p, "rb")
+        local png_bytes = pf:read("*a")
+        pf:close()
+        pcall(os.remove, p)
+        table.insert(frames, vim.base64.encode(png_bytes))
+      end
+      for i = MAX_ANIM_FRAMES, frame_count - 1 do
+        pcall(os.remove, string.format("%s_%04d.png", out_pattern, i))
+      end
+      if #frames < 2 then callback(nil); return end
+      local total = 0
+      for _, d in ipairs(delays) do total = total + d end
+      log.info(string.format("extract_gif_frames_async: %d frames, %dms loop",
+        #frames, total))
+      callback({ frames = frames, delays = delays })
+    end))
 end
 
 -- Convert non-PNG image bytes to PNG via ImageMagick. Returns the PNG b64
@@ -489,16 +493,10 @@ function M.ensure_transmitted(cell_id, b64, callback, opts)
   -- If conversion fails (no magick, or unsupported source), fall through to
   -- chafa so the user sees something rather than a blank cell.
   if mime and mime ~= "image/png" and renderer ~= "chafa" then
-    -- For animated GIFs in placeholder mode, extract every frame so we can
-    -- swap them on a timer. extract_gif_frames returns nil for static GIFs.
-    local anim = nil
-    if mime == "image/gif" and renderer == "placeholder" then
-      anim = extract_gif_frames(b64)
-    end
     ensure_png(b64, mime, function(png_b64)
       if png_b64 then
         opts.mime = "image/png"
-        opts._anim = anim
+        opts._gif_b64 = (mime == "image/gif" and renderer == "placeholder") and b64 or nil
         M.ensure_transmitted(cell_id, png_b64, callback, opts)
       elseif vim.fn.executable("chafa") == 1 then
         log.info("falling back to chafa for " .. tostring(mime))
@@ -529,15 +527,26 @@ function M.ensure_transmitted(cell_id, b64, callback, opts)
       placement_id = id, renderer = "placeholder",
       rows = PLACEHOLDER_ROWS, cols = PLACEHOLDER_COLS,
     }
-    if opts._anim and opts._anim.frames and #opts._anim.frames > 1 then
-      p.frames = opts._anim.frames
-      p.delays = opts._anim.delays
-    end
     placements[cell_id] = p
-    if p.frames then start_animation(p, cell_id) end
-    log.info(string.format("placeholder: cell=%s id=%d transmitted ok, fg=#%06x%s",
-      cell_id, id, id, p.frames and (" animated " .. #p.frames .. " frames") or ""))
+    log.info(string.format("placeholder: cell=%s id=%d transmitted ok, fg=#%06x",
+      cell_id, id, id))
     callback(id)
+
+    -- For gifs, extract remaining frames asynchronously and start animation
+    -- when ready. The first frame is already showing via the placement above,
+    -- so the editor isn't blocked on the multi-second magick run.
+    if opts._gif_b64 then
+      local gif_b64 = opts._gif_b64
+      extract_gif_frames_async(gif_b64, function(anim)
+        local pp = placements[cell_id]
+        if pp ~= p then return end -- placement was replaced or cleared
+        if anim and anim.frames and #anim.frames > 1 then
+          pp.frames = anim.frames
+          pp.delays = anim.delays
+          start_animation(pp, cell_id)
+        end
+      end)
+    end
     return
   end
 

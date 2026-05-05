@@ -59,8 +59,10 @@ local function divider_line(width, label)
   return main .. repeat_char("─", math.max(pad, 0)) .. "┤"
 end
 
--- Word-wrap a single line to `width` DISPLAY COLUMNS (not bytes), so we
--- don't split multi-byte UTF-8 chars (e.g. tqdm's ▏ block chars = 3 bytes).
+-- Wrap a single line to `width` DISPLAY COLUMNS, breaking at space
+-- boundaries when possible so words don't split mid-character. Falls back
+-- to a hard char break for runs longer than `width` with no whitespace.
+-- Uses display widths (not byte lengths) so multi-byte UTF-8 stays intact.
 local function wrap(line, width)
   if width <= 0 then return { line } end
   if vim.fn.strdisplaywidth(line) <= width then return { line } end
@@ -68,18 +70,24 @@ local function wrap(line, width)
   local n = vim.fn.strchars(line)
   local pos = 0
   while pos < n do
-    -- Take chars one at a time until display width exceeds limit
     local start = pos
     local cur_w = 0
+    local last_space = -1
     while pos < n do
       local ch = vim.fn.strcharpart(line, pos, 1)
       local cw = vim.fn.strdisplaywidth(ch)
       if cur_w + cw > width then break end
+      if ch == " " then last_space = pos end
       cur_w = cur_w + cw
       pos = pos + 1
     end
-    if pos == start then pos = pos + 1 end  -- safety: always advance
-    table.insert(out, vim.fn.strcharpart(line, start, pos - start))
+    if pos < n and last_space > start then
+      table.insert(out, vim.fn.strcharpart(line, start, last_space - start))
+      pos = last_space + 1
+    else
+      if pos == start then pos = pos + 1 end
+      table.insert(out, vim.fn.strcharpart(line, start, pos - start))
+    end
   end
   return out
 end
