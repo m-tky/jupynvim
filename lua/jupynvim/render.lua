@@ -558,6 +558,13 @@ function M.refresh(nb, win)
       local wins = vim.fn.win_findbuf(buf)
       win = (wins and wins[1]) or vim.api.nvim_get_current_win()
     end
+    -- Force wrap=true linebreak=false at every refresh. Stale window state
+    -- from earlier sessions may have left these inconsistent and the
+    -- formula-based middle-row overlay placement assumes hard-wrap layout.
+    if win and vim.api.nvim_win_is_valid(win) then
+      pcall(vim.api.nvim_set_option_value, "wrap", true, { win = win })
+      pcall(vim.api.nvim_set_option_value, "linebreak", false, { win = win })
+    end
     local width = 80
     if win and vim.api.nvim_win_is_valid(win) then
       local total = vim.api.nvim_win_get_width(win)

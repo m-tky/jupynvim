@@ -230,7 +230,7 @@ function M._attach_autocmds(buf)
         local wins = vim.fn.win_findbuf(buf)
         for _, win in ipairs(wins) do
           vim.api.nvim_win_call(win, function()
-            vim.cmd("setlocal signcolumn=no conceallevel=2 concealcursor=nc wrap linebreak breakindent")
+            vim.cmd("setlocal signcolumn=no conceallevel=2 concealcursor=nc wrap nolinebreak breakindent")
             vim.cmd([[setlocal showbreak=\│\ ]])
           end)
         end
