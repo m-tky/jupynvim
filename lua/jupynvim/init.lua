@@ -577,44 +577,8 @@ function M.kernel_picker(buf)
   end)
 end
 
--- Toggle entry into the current cell's output. Output cells are rendered
--- as virt_lines so the cursor cannot land on them in the main buffer.
--- This opens the output text in a horizontal split below as a scratch
--- buffer where vim motions, search, and yank work normally. Same key
--- inside the scratch buffer closes it and returns the cursor to the
--- original cell line.
-function M.toggle_output(buf)
-  -- If we're already inside a jupynvim output scratch, close and return.
-  local origin = pcall(vim.api.nvim_buf_get_var, buf, "jupynvim_origin_buf")
-  if origin then
-    local ok, origin_buf = pcall(vim.api.nvim_buf_get_var, buf, "jupynvim_origin_buf")
-    if ok and origin_buf then
-      local origin_line = nil
-      pcall(function() origin_line = vim.b[buf].jupynvim_origin_line end)
-      vim.cmd("close")
-      for _, w in ipairs(vim.fn.win_findbuf(origin_buf)) do
-        vim.api.nvim_set_current_win(w)
-        if origin_line then
-          pcall(vim.api.nvim_win_set_cursor, w, { origin_line, 0 })
-        end
-        return
-      end
-      return
-    end
-  end
-
-  local nb = Notebook.get(buf)
-  if not nb then return end
-  nb:sync_from_buffer()
-  local lnum = vim.api.nvim_win_get_cursor(0)[1]
-  local cell_id = nb:cell_at_line(lnum)
-  if not cell_id then return end
-  local cell = nb:get_cell(cell_id)
-  if not cell or cell.cell_type ~= "code" or not cell.outputs or #cell.outputs == 0 then
-    vim.notify("jupynvim: no output in this cell", vim.log.levels.INFO)
-    return
-  end
-
+-- Internal helper: open the given cell's output as a scratch split.
+local function _open_output_split(buf, cell, origin_line)
   local function as_str(v)
     if type(v) == "table" then return table.concat(v, "") end
     if type(v) == "string" then return v end
@@ -668,7 +632,7 @@ function M.toggle_output(buf)
   vim.api.nvim_set_option_value("bufhidden", "wipe", { buf = scratch })
   vim.api.nvim_set_option_value("filetype", "jupynvim_output", { buf = scratch })
   vim.b[scratch].jupynvim_origin_buf = buf
-  vim.b[scratch].jupynvim_origin_line = lnum
+  vim.b[scratch].jupynvim_origin_line = origin_line
   vim.api.nvim_buf_set_name(scratch,
     string.format("jupynvim://Out[%s]", tostring(cell.execution_count or "?")))
 
@@ -676,15 +640,14 @@ function M.toggle_output(buf)
   vim.cmd("belowright " .. height .. "split")
   vim.api.nvim_set_current_buf(scratch)
 
-  -- Inside the output buffer, <C-j> / <C-k> / q all close it.
   local close_map = function()
     local origin_buf = vim.b.jupynvim_origin_buf
-    local origin_line = vim.b.jupynvim_origin_line
+    local origin_l = vim.b.jupynvim_origin_line
     vim.cmd("close")
     for _, w in ipairs(vim.fn.win_findbuf(origin_buf)) do
       vim.api.nvim_set_current_win(w)
-      if origin_line then
-        pcall(vim.api.nvim_win_set_cursor, w, { origin_line, 0 })
+      if origin_l then
+        pcall(vim.api.nvim_win_set_cursor, w, { origin_l, 0 })
       end
       return
     end
@@ -693,6 +656,127 @@ function M.toggle_output(buf)
   vim.keymap.set("n", "<C-k>", close_map, { buffer = scratch, silent = true, desc = "Leave output" })
   vim.keymap.set("n", "q",     close_map, { buffer = scratch, silent = true, desc = "Leave output" })
 end
+
+local function _has_output(cell)
+  return cell and cell.cell_type == "code" and cell.outputs and #cell.outputs > 0
+end
+
+-- <C-j>: enter the current cell's output (or the NEXT cell's output if
+-- the current cell has none). <C-k>: enter the PREVIOUS cell's output
+-- so when the cursor is below an output region, this key enters that
+-- region. From inside the scratch split, either key (or q) returns.
+function M.enter_output(buf, direction)
+  -- Already inside a jupynvim output scratch? Close and return.
+  local ok, _ = pcall(vim.api.nvim_buf_get_var, buf, "jupynvim_origin_buf")
+  if ok then
+    local origin_buf = vim.b[buf].jupynvim_origin_buf
+    local origin_line = vim.b[buf].jupynvim_origin_line
+    vim.cmd("close")
+    if origin_buf then
+      for _, w in ipairs(vim.fn.win_findbuf(origin_buf)) do
+        vim.api.nvim_set_current_win(w)
+        if origin_line then
+          pcall(vim.api.nvim_win_set_cursor, w, { origin_line, 0 })
+        end
+        return
+      end
+    end
+    return
+  end
+
+  local nb = Notebook.get(buf)
+  if not nb then return end
+  nb:sync_from_buffer()
+  local lnum = vim.api.nvim_win_get_cursor(0)[1]
+  local cur_id = nb:cell_at_line(lnum)
+  local cur_idx = 1
+  for i, c in ipairs(nb.cells) do if c.id == cur_id then cur_idx = i; break end end
+
+  local target_idx
+  if direction == "up" then
+    -- look at current cell, then walk backwards
+    for i = cur_idx, 1, -1 do
+      if _has_output(nb.cells[i]) then target_idx = i; break end
+    end
+  else
+    -- down: current cell first, then walk forwards
+    for i = cur_idx, #nb.cells do
+      if _has_output(nb.cells[i]) then target_idx = i; break end
+    end
+  end
+  if not target_idx then
+    vim.notify("jupynvim: no " .. direction .. " cell with output", vim.log.levels.INFO)
+    return
+  end
+
+  _open_output_split(buf, nb.cells[target_idx], lnum)
+end
+
+-- Save the current cell's image (markdown embedded or code-cell output)
+-- to a file. Format inferred from image/png vs image/jpeg vs image/gif.
+function M.save_image(buf, path)
+  local nb = Notebook.get(buf)
+  if not nb then return end
+  nb:sync_from_buffer()
+  local lnum = vim.api.nvim_win_get_cursor(0)[1]
+  local cell_id = nb:cell_at_line(lnum)
+  if not cell_id then return end
+  local cell = nb:get_cell(cell_id)
+  if not cell then return end
+
+  local b64, ext, mime
+  if cell.cell_type == "markdown" then
+    local imgs = require("jupynvim.embedded").list_images(cell.id) or {}
+    if imgs[1] then
+      b64 = imgs[1].b64
+      mime = imgs[1].mime or "image/png"
+    end
+  end
+  if not b64 then
+    for _, o in ipairs(cell.outputs or {}) do
+      local d = (o.output_type == "execute_result" or o.output_type == "display_data") and o.data or nil
+      if d then
+        for k, v in pairs(d) do
+          if k:match("^image/") then
+            b64 = type(v) == "table" and table.concat(v, "") or v
+            mime = k
+            break
+          end
+        end
+        if b64 then break end
+      end
+    end
+  end
+  if not b64 then
+    vim.notify("jupynvim: no image in this cell", vim.log.levels.WARN)
+    return
+  end
+  ext = ({ ["image/png"] = "png", ["image/jpeg"] = "jpg", ["image/gif"] = "gif",
+           ["image/svg+xml"] = "svg", ["image/webp"] = "webp" })[mime] or "png"
+
+  if not path or path == "" then
+    local default = string.format("./jupynvim_%s.%s", cell.id:sub(1, 8), ext)
+    path = vim.fn.input({ prompt = "Save image as: ", default = default, completion = "file" })
+    if path == "" then return end
+  end
+  path = vim.fn.fnamemodify(path, ":p")
+
+  local raw_ok, raw = pcall(vim.base64.decode, b64)
+  if not raw_ok or not raw then
+    vim.notify("jupynvim: failed to decode image", vim.log.levels.ERROR)
+    return
+  end
+  local f = io.open(path, "wb")
+  if not f then
+    vim.notify("jupynvim: cannot write " .. path, vim.log.levels.ERROR)
+    return
+  end
+  f:write(raw); f:close()
+  vim.notify("jupynvim: saved " .. path, vim.log.levels.INFO)
+end
+
+-- Compatibility shim for the old name; defaults to "down" direction.
+function M.toggle_output(buf) M.enter_output(buf, "down") end
 
 -- Jump cursor to the next or previous cell that contains an image, either as
 -- a markdown embedded image or a code-cell image output. delta > 0 moves
@@ -815,6 +899,9 @@ function M.setup(opts)
     vim.notify("jupynvim image_renderer = " .. mode, vim.log.levels.INFO)
   end, { nargs = 1, complete = function() return { "chafa", "kitty", "placeholder" } end })
 
+  vim.api.nvim_create_user_command("JupynvimSaveImage", function(o)
+    M.save_image(vim.api.nvim_get_current_buf(), o.args)
+  end, { nargs = "?", complete = "file" })
   vim.api.nvim_create_user_command("JupynvimOpen", function(o) M.open(o.args) end, { nargs = 1, complete = "file" })
   vim.api.nvim_create_user_command("JupynvimRunCell", function() M.run_cell(0, { advance = false }) end, {})
   vim.api.nvim_create_user_command("JupynvimRunAll", function() M.run_all(0) end, {})

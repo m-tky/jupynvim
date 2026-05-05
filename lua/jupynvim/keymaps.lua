@@ -41,10 +41,15 @@ function M.attach(buf, api)
   map(buf, "n", "]i", function() api.jump_image(buf, 1) end, "Next image cell")
   map(buf, "n", "[i", function() api.jump_image(buf, -1) end, "Prev image cell")
 
-  -- Open/close the current cell's output in a scratch split where vim
-  -- motions work. Inside the scratch buffer, <C-j>, <C-k>, or q closes it.
-  map(buf, "n", "<C-j>", function() api.toggle_output(buf) end, "Open cell output")
-  map(buf, "n", "<C-k>", function() api.toggle_output(buf) end, "Open cell output")
+  -- Open/close cell output in a scratch split where vim motions work.
+  -- <C-j> enters the current/next cell's output (going down), <C-k>
+  -- enters the previous cell's output (so it works when the cursor is
+  -- below an output region). q, <C-j>, or <C-k> from inside closes it.
+  map(buf, "n", "<C-j>", function() api.enter_output(buf, "down") end, "Enter output below")
+  map(buf, "n", "<C-k>", function() api.enter_output(buf, "up") end, "Enter output above")
+
+  -- Save the current cell's image to a file. Prompts for a path.
+  map(buf, "n", "<leader>nI", function() api.save_image(buf) end, "Save cell image")
 
   -- Refresh display
   map(buf, "n", "<leader>nL", function() api.refresh(buf) end, "Refresh notebook display")
