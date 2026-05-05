@@ -371,35 +371,56 @@ local function render_cell(nb, cell, range, width, win)
     virt_lines = lines_below,
   })
 
-  -- Borders live in the text area at fixed columns so they line up with
-  -- the ┌ ┐ ├ ┤ └ ┘ glyphs in the header, divider, and footer.
-  --
-  -- Right bar uses two stacked marks. virt_text_win_col=width-1 lands on
-  -- the FIRST visual row of a wrapped line. virt_text_pos=eol_right_align
-  -- lands on the LAST visual row. Together they cover unwrapped lines
-  -- (both at the same column, the higher priority one wins) and lines
-  -- wrapping to two visual rows (each row gets one bar). Lines wrapping
-  -- to three or more rows still miss their middle rows; Neovim has no
-  -- per-visual-row API for naturally wrapped content.
+  -- Right bar on every wrapped row. neovim renders virt_text_win_col only
+  -- on the first visual row and eol_right_align only on the last visual
+  -- row of a wrapped buffer line, so 3+-row wraps lose their middle rows.
+  -- the only path that works for arbitrary wrap counts is pre-wrapping:
+  -- the buffer is set to nowrap, the long source line is concealed (one
+  -- visual row), the first wrapped chunk overlays that row with both
+  -- borders, and the remaining chunks attach as virt_lines below. total
+  -- visual rows equal the chunk count. short lines keep the cheap path.
+  local buf_lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
   for ln = range.start, math.min(range.stop - 1, total - 1) do
-    pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, 0, {
-      virt_text = { { "│ ", HL_BORDER } },
-      virt_text_pos = "inline",
-      hl_mode = "combine",
-      priority = 100,
-    })
-    pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, 0, {
-      virt_text = { { "│", HL_BORDER } },
-      virt_text_win_col = width - 1,
-      hl_mode = "combine",
-      priority = 100,
-    })
-    pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, 0, {
-      virt_text = { { "│", HL_BORDER } },
-      virt_text_pos = "eol_right_align",
-      hl_mode = "combine",
-      priority = 50,
-    })
+    local line_text = buf_lines[ln + 1] or ""
+    local line_w = vim.fn.strdisplaywidth(line_text)
+    -- the +2 accounts for the inline `│ ` prefix on short lines.
+    if line_w + 2 > width then
+      local chunks = wrap(line_text, width - 4)
+      pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, 0, {
+        end_col = #line_text,
+        conceal = "",
+        priority = 200,
+      })
+      pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, 0, {
+        virt_text = with_sides(chunks[1] or "", "Normal", width),
+        virt_text_pos = "overlay",
+        hl_mode = "combine",
+        priority = 105,
+      })
+      if #chunks > 1 then
+        local extra = {}
+        for i = 2, #chunks do
+          table.insert(extra, with_sides(chunks[i], "Normal", width))
+        end
+        pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, 0, {
+          virt_lines = extra,
+          priority = 105,
+        })
+      end
+    else
+      pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, 0, {
+        virt_text = { { "│ ", HL_BORDER } },
+        virt_text_pos = "inline",
+        hl_mode = "combine",
+        priority = 100,
+      })
+      pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, 0, {
+        virt_text = { { "│", HL_BORDER } },
+        virt_text_win_col = width - 1,
+        hl_mode = "combine",
+        priority = 100,
+      })
+    end
   end
 
   -- Markdown cells: render styling + transmit embedded images
