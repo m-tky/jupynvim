@@ -159,11 +159,14 @@ function M.open(path, opts)
   -- Create or reuse the buffer
   local buf = vim.fn.bufnr(abs, true)
   vim.api.nvim_buf_set_name(buf, abs)
-  -- Leaving buftype empty (instead of acwrite) so LSP, formatters, and
-  -- copilot treat this like a regular source file. BufWriteCmd still
+  -- Leave buftype empty (instead of acwrite or nofile) so LSP, formatters,
+  -- and copilot treat this like a regular source file. BufWriteCmd still
   -- intercepts :w so our save path serialises cells via the backend
-  -- rather than dumping the visible buffer text to disk.
-  vim.api.nvim_buf_set_option(buf, "buftype", "")
+  -- rather than dumping the visible buffer text to disk. We use the
+  -- modern set_option_value API and reapply in autocmds because some
+  -- plugins (e.g. LazyVim-style buffer setup) clobber buftype on
+  -- BufNewFile or FileType.
+  vim.api.nvim_set_option_value("buftype", "", { buf = buf })
   vim.api.nvim_buf_set_option(buf, "swapfile", false)
   vim.api.nvim_buf_set_option(buf, "modifiable", true)
   vim.api.nvim_buf_set_option(buf, "filetype", language_filetype(snap))
@@ -226,16 +229,21 @@ function M._attach_autocmds(buf)
   local group = vim.api.nvim_create_augroup("Jupynvim_" .. buf, { clear = true })
 
   -- Force window options + close duplicates whenever the notebook buf appears.
-  vim.api.nvim_create_autocmd({ "BufWinEnter", "WinNew", "WinEnter" }, {
+  -- Also reassert buftype="" on every entry so plugins that set nofile
+  -- (LazyVim, mini.bufremove, etc) can't break LSP/copilot attachment.
+  vim.api.nvim_create_autocmd({ "BufWinEnter", "WinNew", "WinEnter", "FileType", "BufEnter" }, {
     group = group, buffer = buf,
     callback = function()
       vim.schedule(function()
         if not vim.api.nvim_buf_is_valid(buf) then return end
+        if vim.bo[buf].buftype ~= "" then
+          pcall(vim.api.nvim_set_option_value, "buftype", "", { buf = buf })
+        end
         local wins = vim.fn.win_findbuf(buf)
         for _, win in ipairs(wins) do
           vim.api.nvim_win_call(win, function()
-            vim.cmd("setlocal signcolumn=no conceallevel=2 concealcursor=nc wrap nolinebreak breakindent")
-            vim.cmd([[setlocal showbreak=\│\ ]])
+            vim.cmd("setlocal signcolumn=no conceallevel=2 concealcursor=nc wrap linebreak breakindent breakindentopt=min:2")
+            vim.cmd([[setlocal showbreak=\ ]])
           end)
         end
         if #wins > 1 then
@@ -558,26 +566,69 @@ function M.interrupt_kernel(buf)
   ensure_client():call("interrupt_kernel", { session_id = nb.session_id }, function() end)
 end
 
--- Clear outputs and execution_count from every cell in the notebook.
--- Mirrors `jupyter nbconvert --clear-output --inplace`. Local Lua state
--- and backend state are both wiped; saving writes the cleared notebook.
+-- Clear outputs and execution_count from every CODE cell in the notebook.
+-- Markdown cells (and their embedded images) are left untouched. Mirrors
+-- `jupyter nbconvert --clear-output --inplace`.
 function M.clear_outputs(buf)
   local nb = Notebook.get(buf)
   if not nb then return end
+  local Image = require("jupynvim.image")
+  nb.image_ids = nb.image_ids or {}
   for _, c in ipairs(nb.cells) do
-    c.outputs = {}
-    c.execution_count = nil
-    nb.cell_state[c.id] = nil
+    if c.cell_type == "code" then
+      c.outputs = {}
+      c.execution_count = nil
+      nb.cell_state[c.id] = nil
+      -- Drop only code-cell image placements; markdown embedded images
+      -- (keys like "<id>_md_<idx>") stay so the cell still renders them.
+      pcall(Image.clear_for_cell, c.id)
+      nb.image_ids[c.id] = nil
+    end
   end
-  -- Drop any image placements tied to these outputs.
-  pcall(function() require("jupynvim.image").clear_all() end)
-  nb.image_ids = {}
+  -- Refresh immediately so the user sees execution badges and outputs
+  -- reset even if the backend RPC is missing (older binary). The backend
+  -- call is best-effort; on success the on-disk state will match too.
+  Render.refresh(nb, vim.fn.bufwinid(buf))
   ensure_client():call("clear_outputs", { session_id = nb.session_id }, function(err)
     if err then
-      vim.notify("clear_outputs: " .. tostring(err), vim.log.levels.ERROR)
-      return
+      vim.schedule(function()
+        vim.notify(
+          "jupynvim: backend doesn't support clear_outputs yet — rebuild with `cargo build --release`",
+          vim.log.levels.WARN)
+      end)
     end
-    vim.schedule(function() Render.refresh(nb, vim.fn.bufwinid(buf)) end)
+  end)
+end
+
+-- Clear outputs of just the cell under the cursor.
+function M.clear_cell_output(buf)
+  local nb = Notebook.get(buf)
+  if not nb then return end
+  nb:sync_from_buffer()
+  local lnum = vim.api.nvim_win_get_cursor(0)[1]
+  local cell_id = nb:cell_at_line(lnum)
+  if not cell_id then return end
+  local cell = nb:get_cell(cell_id)
+  if not cell or cell.cell_type ~= "code" then
+    vim.notify("jupynvim: not a code cell", vim.log.levels.INFO)
+    return
+  end
+  cell.outputs = {}
+  cell.execution_count = nil
+  nb.cell_state[cell.id] = nil
+  pcall(require("jupynvim.image").clear_for_cell, cell.id)
+  nb.image_ids = nb.image_ids or {}
+  nb.image_ids[cell.id] = nil
+  Render.refresh(nb, vim.fn.bufwinid(buf))
+  ensure_client():call("clear_cell_output",
+    { session_id = nb.session_id, cell_id = cell.id }, function(err)
+    if err then
+      vim.schedule(function()
+        vim.notify(
+          "jupynvim: backend doesn't support clear_cell_output yet — rebuild with `cargo build --release`",
+          vim.log.levels.WARN)
+      end)
+    end
   end)
 end
 
@@ -935,6 +986,7 @@ function M.setup(opts)
   vim.api.nvim_create_user_command("JupynvimKernel", function() M.kernel_picker(0) end, {})
   vim.api.nvim_create_user_command("JupynvimRestart", function() M.restart_kernel(0) end, {})
   vim.api.nvim_create_user_command("JupynvimClearOutputs", function() M.clear_outputs(0) end, {})
+  vim.api.nvim_create_user_command("JupynvimClearCellOutput", function() M.clear_cell_output(0) end, {})
 
   -- Nuclear reset: close all sessions, wipe all notebook buffers, reload from disk.
   vim.api.nvim_create_user_command("JupynvimReset", function()

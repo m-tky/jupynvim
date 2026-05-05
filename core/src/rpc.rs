@@ -211,6 +211,7 @@ impl Server {
             "delete_cell" => self.delete_cell(p).await,
             "move_cell" => self.move_cell(p).await,
             "clear_outputs" => self.clear_outputs(p).await,
+            "clear_cell_output" => self.clear_cell_output(p).await,
             "save" => self.save(p).await,
             "save_as" => self.save_as(p).await,
             "replace_cells" => self.replace_cells(p).await,
@@ -483,6 +484,15 @@ impl Server {
         let sid = p.get("session_id").and_then(|v| v.as_str()).ok_or_else(|| anyhow!("session_id"))?;
         let s = self.sessions.get(sid).ok_or_else(|| anyhow!("no session"))?.clone();
         s.clear_outputs();
+        Ok(json!({ "ok": true }))
+    }
+
+    /// Clear outputs and execution_count of a single cell by id.
+    async fn clear_cell_output(&self, p: Json) -> Result<Json> {
+        let sid = p.get("session_id").and_then(|v| v.as_str()).ok_or_else(|| anyhow!("session_id"))?;
+        let cell_id = p.get("cell_id").and_then(|v| v.as_str()).ok_or_else(|| anyhow!("cell_id"))?;
+        let s = self.sessions.get(sid).ok_or_else(|| anyhow!("no session"))?.clone();
+        s.clear_cell_output(cell_id);
         Ok(json!({ "ok": true }))
     }
 

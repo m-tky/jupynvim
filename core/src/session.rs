@@ -169,6 +169,15 @@ impl Session {
         }
     }
 
+    /// Wipe outputs and execution_count for a single cell by id.
+    pub fn clear_cell_output(&self, cell_id: &str) {
+        let mut nb = self.notebook.write();
+        if let Some(cell) = nb.cells.iter_mut().find(|c| c.id == cell_id) {
+            cell.outputs.clear();
+            cell.execution_count = None;
+        }
+    }
+
     /// Replace the cell list wholesale from a frontend snapshot.
     /// Outputs/exec_count are preserved for cells whose id is in the new list.
     /// Cells absent from `incoming` are dropped (this is how the buffer drives

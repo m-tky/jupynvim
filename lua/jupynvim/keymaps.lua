@@ -34,7 +34,8 @@ function M.attach(buf, api)
   map(buf, "n", "<leader>nS", function() api.stop_kernel(buf) end, "Stop kernel")
   map(buf, "n", "<leader>ni", function() api.interrupt_kernel(buf) end, "Interrupt kernel")
   map(buf, "n", "<leader>nx", function() api.restart_kernel(buf) end, "Restart kernel")
-  map(buf, "n", "<leader>nc", function() api.clear_outputs(buf) end, "Clear all outputs")
+  map(buf, "n", "<leader>nc", function() api.clear_cell_output(buf) end, "Clear current cell output")
+  map(buf, "n", "<leader>nC", function() api.clear_outputs(buf) end, "Clear all outputs")
 
   -- Cell navigation
   map(buf, "n", "]c", function() api.jump_cell(buf, 1) end, "Next cell")
