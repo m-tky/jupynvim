@@ -371,15 +371,12 @@ local function render_cell(nb, cell, range, width, win)
     virt_lines = lines_below,
   })
 
-  -- Borders. Inline `│ ` left + virt_text_win_col right cover unwrapped
-  -- lines and the first row of wrapped lines. eol_right_align covers the
-  -- last visual row. With nolinebreak (set in init.lua), wrap happens at
-  -- exactly width - 2 source cells per row (inline and showbreak each
-  -- take 2 cells), so the source virtcol at the end of visual row R is
-  -- R * (width - 2). For 3+-row wraps, place an overlay │ at that
-  -- buffer column for each intermediate row.
-  local content_w = math.max(width - 2, 1)
-  local buf_lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+  -- Borders: inline left + virt_text_win_col right (first visual row) +
+  -- eol_right_align (last visual row). 3+-row wraps lose middle rows;
+  -- there's no Neovim API to put virt_text on every visual row of a
+  -- wrapped line, and every workaround tried so far either breaks vim
+  -- motions or depends on wrap/linebreak/showbreak settings being what
+  -- we expect when other config can override them.
   for ln = range.start, math.min(range.stop - 1, total - 1) do
     pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, 0, {
       virt_text = { { "│ ", HL_BORDER } },
@@ -399,23 +396,6 @@ local function render_cell(nb, cell, range, width, win)
       hl_mode = "combine",
       priority = 50,
     })
-    local line_text = buf_lines[ln + 1] or ""
-    local line_dw = vim.fn.strdisplaywidth(line_text)
-    if line_dw > 2 * content_w and #line_text > 0 then
-      local rows = math.ceil(line_dw / content_w)
-      for r = 2, rows - 1 do
-        local target_vcol = r * content_w
-        local ok, buf_col = pcall(vim.fn.virtcol2col, win, ln + 1, target_vcol)
-        if ok and type(buf_col) == "number" and buf_col > 0 and buf_col <= #line_text then
-          pcall(vim.api.nvim_buf_set_extmark, buf, nb.border_ns, ln, buf_col - 1, {
-            virt_text = { { "│", HL_BORDER } },
-            virt_text_pos = "overlay",
-            hl_mode = "combine",
-            priority = 100,
-          })
-        end
-      end
-    end
   end
 
   -- Markdown cells: render styling + transmit embedded images
@@ -557,13 +537,6 @@ function M.refresh(nb, win)
     if not win or not vim.api.nvim_win_is_valid(win) then
       local wins = vim.fn.win_findbuf(buf)
       win = (wins and wins[1]) or vim.api.nvim_get_current_win()
-    end
-    -- Force wrap=true linebreak=false at every refresh. Stale window state
-    -- from earlier sessions may have left these inconsistent and the
-    -- formula-based middle-row overlay placement assumes hard-wrap layout.
-    if win and vim.api.nvim_win_is_valid(win) then
-      pcall(vim.api.nvim_set_option_value, "wrap", true, { win = win })
-      pcall(vim.api.nvim_set_option_value, "linebreak", false, { win = win })
     end
     local width = 80
     if win and vim.api.nvim_win_is_valid(win) then
