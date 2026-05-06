@@ -96,22 +96,29 @@ function M._handle_cell_event(p)
       end
       -- EAGER image transmission — must use the SAME renderer as the active
       -- config so the cache entry matches what render_cell expects.
+      -- Prefer image/gif (animations) over image/png so display_data with
+      -- both formats animates instead of showing a static frame.
       local ev = p.event or {}
       if ev.kind == "display_data" or ev.kind == "execute_result" then
         if ev.data then
-          local b64 = ev.data["image/png"]
-          if type(b64) == "table" then b64 = table.concat(b64, "") end
-          if type(b64) == "string" and b64 ~= "" and Image.supported() then
+          local b64, mime
+          for _, m in ipairs({ "image/gif", "image/png", "image/jpeg" }) do
+            local v = ev.data[m]
+            if type(v) == "table" then v = table.concat(v, "") end
+            if type(v) == "string" and v ~= "" then
+              b64, mime = v, m
+              break
+            end
+          end
+          if b64 and Image.supported() then
             nb.image_ids = nb.image_ids or {}
             local renderer = M.config.image_renderer or "chafa"
             Image.ensure_transmitted(p.cell_id, b64, function(id)
               if id then
                 nb.image_ids[p.cell_id] = id
-                -- Re-render so build_output_virt_lines picks up the
-                -- newly-cached image data (placeholder rows or ascii).
                 vim.schedule(function() Render.refresh(nb, vim.fn.bufwinid(buf)) end)
               end
-            end, { renderer = renderer })
+            end, { renderer = renderer, mime = mime })
           end
         end
       end
@@ -174,51 +181,94 @@ function M.open(path, opts)
   vim.api.nvim_buf_set_name(buf, abs)
   -- acwrite forces :w through our BufWriteCmd. With "" Neovim sometimes
   -- falls through to native write that dumps the visible cell-rendered
-  -- text to disk, breaking save. We compensate for LSPs that skip
-  -- non-empty buftype by re-firing FileType (and LspStart if available)
-  -- after acwrite is set.
+  -- text to disk, breaking save. Neovim's vim.lsp.enable callback
+  -- explicitly skips buftype != '' (runtime/lua/vim/lsp.lua: lsp_enable_callback)
+  -- so we attach LSP manually below in M._attach_lsp.
   vim.api.nvim_set_option_value("buftype", "acwrite", { buf = buf })
   vim.api.nvim_buf_set_option(buf, "swapfile", false)
   vim.api.nvim_buf_set_option(buf, "modifiable", true)
   local ft = language_filetype(snap)
-  -- Neovim's default filetype detection maps .ipynb to json (the file
-  -- IS json on disk). We want python (or whatever the kernelspec
-  -- language is) so LSP/copilot/treesitter treat the buffer as code.
-  -- Set filetype AFTER firing BufRead/BufReadPost so anything those
-  -- handlers do can't clobber us, then reassert on BufEnter just in
-  -- case some plugin re-detects later.
   vim.b[buf].jupynvim_filetype = ft
-  vim.schedule(function()
-    if not vim.api.nvim_buf_is_valid(buf) then return end
-    vim.api.nvim_exec_autocmds("BufRead", { buffer = buf, modeline = false })
-    vim.api.nvim_exec_autocmds("BufReadPost", { buffer = buf, modeline = false })
-    vim.bo[buf].filetype = ft
-    vim.api.nvim_exec_autocmds("FileType", { buffer = buf, modeline = false })
-    pcall(vim.cmd, "LspStart")
-  end)
 
   local nb = Notebook.create(buf, abs, sid, snap)
   M._populate_buffer(nb)
   M._attach_autocmds(buf)
   Keymaps.attach(buf, M)
 
+  -- Display the buffer FIRST so we have a real window for the synchronous
+  -- option-setting that follows. Without this, win_findbuf is empty and
+  -- conceallevel doesn't get applied before the first redraw - which made
+  -- the literal "# %%[jupynvim:cell-sep]" markers flash visible on open.
   vim.api.nvim_set_current_buf(buf)
-  Render.refresh(nb, vim.api.nvim_get_current_win())
-  M._opening[abs] = nil
+  local cur_win = vim.api.nvim_get_current_win()
 
   -- Force a single window for the notebook buffer. Other plugins (LazyVim
   -- defaults, snacks.dashboard, neo-tree, etc.) sometimes auto-split on
-  -- :edit, which makes the cells appear duplicated. Close everything except
-  -- the current window's view of this buffer.
+  -- :edit, which makes cells appear duplicated.
   local wins = vim.fn.win_findbuf(buf)
   if #wins > 1 then
-    local cur_win = vim.api.nvim_get_current_win()
     for _, w in ipairs(wins) do
       if w ~= cur_win then
         pcall(vim.api.nvim_win_close, w, true)
       end
     end
   end
+
+  -- Window options NOW (synchronously, while the buffer is displayed) so
+  -- the conceal extmarks placed by _populate_buffer take effect on the
+  -- very first redraw. Doing this in a scheduled callback caused a one-frame
+  -- flash where the separator markers were visible.
+  vim.api.nvim_win_call(cur_win, function()
+    vim.cmd("setlocal signcolumn=no conceallevel=2 concealcursor=nc wrap linebreak breakindent breakindentopt=min:2 nofoldenable foldmethod=manual")
+    vim.cmd([[setlocal showbreak=\ ]])
+  end)
+
+  -- Set filetype AFTER buffer display + window setup so FileType-driven
+  -- plugins (treesitter, snippets, copilot) see a fully-prepared buffer.
+  -- Setting `filetype` fires FileType, which in turn loads ftplugin/indent
+  -- via Neovim's runtime autocmds. For buffers created via nvim_buf_set_lines
+  -- (instead of `:edit`) the indent file occasionally doesn't get sourced —
+  -- explicitly source it so `for i in range(...):<CR>` auto-indents.
+  vim.bo[buf].filetype = ft
+  vim.api.nvim_win_call(cur_win, function()
+    pcall(vim.cmd, "runtime! ftplugin/" .. ft .. ".vim")
+    pcall(vim.cmd, "runtime! ftplugin/" .. ft .. "/*.vim")
+    pcall(vim.cmd, "runtime! indent/" .. ft .. ".vim")
+  end)
+
+  -- Look up the kernel python BEFORE LSP attaches so we can inject
+  -- settings.python.pythonPath + analysis.extraPaths into the config.
+  -- basedpyright doesn't execute the interpreter to discover sys.path - it
+  -- probes the filesystem under <pythonPath>/../lib/.../site-packages. With
+  -- Homebrew Python that path is empty (numpy actually lives at
+  -- /opt/homebrew/lib/python3.14/site-packages). We run the kernel python
+  -- once to harvest its real site-packages directories.
+  local py_path
+  local extra_paths = {}
+  local kspec_name = (snap.metadata and snap.metadata.kernelspec and snap.metadata.kernelspec.name) or "python3"
+  local kerr, kres = M.client:call_sync("list_kernels", {}, 2000)
+  if not kerr and type(kres) == "table" then
+    for _, k in ipairs(kres) do
+      if k.name == kspec_name and k.argv and k.argv[1] then
+        py_path = k.argv[1]
+        local sys_path = vim.fn.system({ py_path, "-c", "import sys; print('\\n'.join(p for p in sys.path if p))" })
+        if vim.v.shell_error == 0 then
+          for line in sys_path:gmatch("[^\r\n]+") do
+            if line:find("site%-packages") or line:find("dist%-packages") then
+              table.insert(extra_paths, line)
+            end
+          end
+        end
+        break
+      end
+    end
+  end
+  nb.kernel_python_path = py_path
+  nb.kernel_extra_paths = extra_paths
+  M._attach_lsp(buf, ft, py_path, extra_paths)
+
+  Render.refresh(nb, cur_win)
+  M._opening[abs] = nil
 
   -- Auto-start kernel based on notebook metadata
   vim.defer_fn(function() M.start_kernel(buf) end, 50)
@@ -233,6 +283,94 @@ function language_filetype(snap)
   -- Map known kernel languages to Neovim filetypes
   local map = { python = "python", julia = "julia", r = "r", javascript = "javascript", typescript = "typescript" }
   return map[lang:lower()] or "python"
+end
+
+-- Attach LSP clients manually. Two problems we work around here:
+--
+-- 1. Many LazyVim-style configs lazy-load nvim-lspconfig / mason-lspconfig on
+--    `BufReadPre, BufNewFile`. But .ipynb opens go through our `BufReadCmd`
+--    hijack, and Vim's "Cmd" events SUPPRESS BufReadPre, so the LSP plugin
+--    never loads → vim.lsp._enabled_configs stays empty. We force-load it
+--    via lazy.nvim's API.
+--
+-- 2. Even with configs registered, Neovim's own FileType callback for
+--    vim.lsp.enable bails on `buftype ~= ''` (runtime/lua/vim/lsp.lua,
+--    lsp_enable_callback). We need buftype='acwrite' for save hijack, so
+--    we replicate the callback body (filetype filter + vim.lsp.start) but
+--    skip the buftype guard.
+function M._attach_lsp(buf, ft, py_path, extra_paths)
+  -- Force-load any LSP plugins gated on BufReadPre that our BufReadCmd skipped.
+  pcall(function()
+    local lazy = require("lazy")
+    lazy.load({ plugins = { "nvim-lspconfig", "mason-lspconfig.nvim", "mason.nvim" } })
+  end)
+  -- Some setups also register configs by firing BufReadPre at FileType time.
+  pcall(vim.api.nvim_exec_autocmds, "BufReadPre", { buffer = buf, modeline = false })
+
+  local lsp = vim.lsp
+  if not (lsp and lsp.config and lsp._enabled_configs) then
+    pcall(vim.cmd, "LspStart")
+    return
+  end
+  if not next(lsp._enabled_configs) then
+    -- No configs registered yet — try once more after a short defer in case
+    -- mason-lspconfig is still finishing its async registry refresh.
+    vim.defer_fn(function()
+      if vim.api.nvim_buf_is_valid(buf) then M._attach_lsp(buf, ft, py_path, extra_paths) end
+    end, 200)
+    return
+  end
+  for name in pairs(lsp._enabled_configs) do
+    local config = lsp.config[name]
+    local ft_ok = config
+      and (not config.filetypes or vim.tbl_contains(config.filetypes, ft))
+    if ft_ok then
+      local cfg = vim.deepcopy(config)
+      -- Force Full sync so didChange routes through _buf_get_full_text
+      -- (patched in jupynvim.lsp to blank out non-code lines).
+      require("jupynvim.lsp").force_full_sync(cfg)
+      -- Inject the kernel's interpreter AND its real site-packages dirs.
+      -- pythonPath alone is not enough for basedpyright because it probes
+      -- <pythonPath>/../lib for site-packages instead of running the
+      -- interpreter, and Homebrew Python's site-packages live elsewhere.
+      if py_path and py_path ~= ""
+         and (name == "basedpyright" or name == "pyright" or name == "pylsp" or name == "ruff") then
+        cfg.settings = vim.tbl_deep_extend("force", cfg.settings or {}, {
+          python = { pythonPath = py_path, analysis = { extraPaths = extra_paths or {} } },
+          basedpyright = {
+            python = { pythonPath = py_path },
+            analysis = { extraPaths = extra_paths or {} },
+          },
+        })
+        cfg.init_options = vim.tbl_deep_extend("force", cfg.init_options or {}, {
+          settings = {
+            python = { pythonPath = py_path },
+            basedpyright = { analysis = { extraPaths = extra_paths or {} } },
+          },
+        })
+      end
+      local opts = {
+        bufnr = buf,
+        -- Don't reuse a client that may have been started earlier for a .py
+        -- buffer with a different pythonPath. Force a fresh client per
+        -- jupynvim buffer so settings.python.pythonPath actually applies.
+        reuse_client = py_path and function() return false end or cfg.reuse_client,
+        _root_markers = cfg.root_markers,
+      }
+      if type(cfg.root_dir) == "function" then
+        cfg.root_dir(buf, function(root_dir)
+          cfg.root_dir = root_dir
+          vim.schedule(function()
+            if vim.api.nvim_buf_is_valid(buf) then
+              pcall(lsp.start, cfg, opts)
+            end
+          end)
+        end)
+      else
+        pcall(lsp.start, cfg, opts)
+      end
+    end
+  end
 end
 
 function M._populate_buffer(nb)
@@ -259,10 +397,40 @@ function M._populate_buffer(nb)
   -- continuation row. Right border on continuation rows is a known gap.
   for _, win in ipairs(vim.fn.win_findbuf(nb.buf)) do
     vim.api.nvim_win_call(win, function()
-      vim.cmd("setlocal signcolumn=no conceallevel=2 concealcursor=nc wrap linebreak breakindent breakindentopt=min:2")
+      vim.cmd("setlocal signcolumn=no conceallevel=2 concealcursor=nc wrap linebreak breakindent breakindentopt=min:2 nofoldenable foldmethod=manual")
       vim.cmd([[setlocal showbreak=\ ]])
     end)
   end
+  M._sync_treesitter_ranges(nb)
+end
+
+-- Restrict the treesitter Python parser to code-cell line ranges only.
+-- Markdown cells contain words like "with both side bars" that the Python
+-- parser tries to interpret as a `with` statement, which throws it into
+-- error-recovery mode and corrupts highlighting in the next code cell
+-- (the second `import` ends up captured as @variable.python instead of
+-- @keyword.import.python). Treesitter's set_included_regions tells the
+-- parser to ignore everything outside these byte ranges, so the Python
+-- AST sees only code.
+function M._sync_treesitter_ranges(nb)
+  if not vim.treesitter then return end
+  local ok, parser = pcall(vim.treesitter.get_parser, nb.buf, vim.bo[nb.buf].filetype)
+  if not ok or not parser then return end
+  local _, ranges = nb:to_lines()
+  local lines = vim.api.nvim_buf_get_lines(nb.buf, 0, -1, false)
+  local regions = {}
+  for _, r in ipairs(ranges) do
+    if r.type == "code" and r.start < #lines and r.stop > r.start then
+      local last_row = math.min(r.stop - 1, #lines - 1)
+      local start_byte = vim.api.nvim_buf_get_offset(nb.buf, r.start)
+      local last_line = lines[last_row + 1] or ""
+      local end_byte = vim.api.nvim_buf_get_offset(nb.buf, last_row) + #last_line
+      table.insert(regions, {
+        { r.start, 0, start_byte, last_row, #last_line, end_byte },
+      })
+    end
+  end
+  pcall(parser.set_included_regions, parser, regions)
 end
 
 function M._attach_autocmds(buf)
@@ -283,7 +451,7 @@ function M._attach_autocmds(buf)
         local wins = vim.fn.win_findbuf(buf)
         for _, win in ipairs(wins) do
           vim.api.nvim_win_call(win, function()
-            vim.cmd("setlocal signcolumn=no conceallevel=2 concealcursor=nc wrap linebreak breakindent breakindentopt=min:2")
+            vim.cmd("setlocal signcolumn=no conceallevel=2 concealcursor=nc wrap linebreak breakindent breakindentopt=min:2 nofoldenable foldmethod=manual")
             vim.cmd([[setlocal showbreak=\ ]])
           end)
         end
@@ -304,13 +472,51 @@ function M._attach_autocmds(buf)
       M._save(nb)
     end,
   })
+  -- LSP may attach after the kernel started (timing depends on lazy
+  -- loading). If so, the start_kernel didChangeConfiguration call missed
+  -- this client - re-push the kernel's pythonPath now.
+  vim.api.nvim_create_autocmd("LspAttach", {
+    group = group, buffer = buf,
+    callback = function()
+      local nb = Notebook.get(buf)
+      if nb and nb.kernel_python_path then
+        vim.schedule(function()
+          M._sync_lsp_python_path(buf, nb.kernel_python_path, nb.kernel_extra_paths)
+        end)
+      end
+    end,
+  })
   vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
     group = group, buffer = buf,
     callback = function()
       local nb = Notebook.get(buf)
       if not nb then return end
-      -- Light-weight: re-render borders only (no backend round-trip)
+      -- Sync cell.source from buffer so render's content-driven filters
+      -- (e.g., markdown image placeholder presence) reflect undo/redo
+      -- restoring text. Without this, `u` brings the line back visually
+      -- but cell.source still says it's gone, so the gif never re-renders.
+      nb:sync_from_buffer()
+      -- If the user pasted a `data:image/...;base64,...` URI into a markdown
+      -- cell, replace it with a short `jupynvim-img:N` placeholder and stash
+      -- the originals so render can transmit + animate the image. Without
+      -- this, the giant base64 stays inline in the buffer (laggy) and the
+      -- image never displays until reopen.
+      local Embedded = require("jupynvim.embedded")
+      local needs_repop = false
+      for _, c in ipairs(nb.cells) do
+        if c.cell_type == "markdown" and c.source and c.source:find("data:image", 1, true) then
+          c.source = Embedded.preprocess_incremental(c.id, c.source)
+          needs_repop = true
+        end
+      end
+      if needs_repop then
+        local cur = vim.api.nvim_win_get_cursor(0)
+        M._populate_buffer(nb)
+        pcall(vim.api.nvim_win_set_cursor, 0,
+          { math.min(cur[1], vim.api.nvim_buf_line_count(buf)), cur[2] })
+      end
       Render.refresh(nb, vim.fn.bufwinid(buf))
+      M._sync_treesitter_ranges(nb)
     end,
   })
   vim.api.nvim_create_autocmd("BufWipeout", {
@@ -567,19 +773,55 @@ function M.set_cell_type(buf, t)
       cell.cell_type = t
       if t ~= "code" then cell.outputs = {}; cell.execution_count = nil end
     end
+    -- Toggling cell type changes which line ranges should be parsed as the
+    -- kernel language by treesitter. Without re-syncing the included regions,
+    -- a markdown→code switch leaves the new code cell uncolored.
+    M._sync_treesitter_ranges(nb)
     Render.refresh(nb, vim.fn.bufwinid(buf))
   end)
+end
+
+-- Push a python interpreter path to any pyright/basedpyright/pylsp clients
+-- attached to this buffer. Without this, basedpyright uses its bundled
+-- interpreter (no numpy / no project deps) and shows spurious
+-- "Import 'numpy' could not be resolved" diagnostics on every notebook.
+function M._sync_lsp_python_path(buf, py_path, extra_paths)
+  if not py_path or py_path == "" then return end
+  extra_paths = extra_paths or {}
+  local clients = vim.lsp.get_clients({ bufnr = buf })
+  for _, client in ipairs(clients) do
+    local n = client.name or ""
+    if n == "basedpyright" or n == "pyright" or n == "pylsp" or n == "ruff" then
+      client.settings = vim.tbl_deep_extend("force", client.settings or {}, {
+        python = { pythonPath = py_path, analysis = { extraPaths = extra_paths } },
+        basedpyright = {
+          python = { pythonPath = py_path },
+          analysis = { extraPaths = extra_paths },
+        },
+      })
+      -- Per LSP spec, settings=null tells the server to re-fetch via
+      -- workspace/configuration. Sending the settings inline doesn't always
+      -- trigger basedpyright's module-resolution refresh - lspconfig's own
+      -- :LspPyrightSetPythonPath command uses settings=nil for this reason.
+      pcall(client.notify, client, "workspace/didChangeConfiguration", { settings = vim.NIL })
+    end
+  end
 end
 
 function M.start_kernel(buf, kernel_name)
   local nb = Notebook.get(buf)
   if not nb then return end
+  -- Don't auto-restart if a kernel is already running for this notebook.
+  -- The auto-start in M.open could otherwise run multiple times (e.g.
+  -- BufReadCmd re-firing) and orphan ipykernel processes.
+  if nb.kernel_started and not kernel_name then return end
   local cl = ensure_client()
   cl:call("start_kernel", { session_id = nb.session_id, kernel_name = kernel_name }, function(err, res)
     if err then
       vim.notify("start_kernel: " .. tostring(err), vim.log.levels.ERROR)
       return
     end
+    nb.kernel_started = true
     vim.notify("jupynvim: kernel '" .. (res.kernel_name or "?") .. "' started", vim.log.levels.INFO)
     -- Auto-inject inline plotting magic for python kernels (silent — no output)
     local lang = (nb.notebook_meta and nb.notebook_meta.language) or "python"
@@ -589,6 +831,34 @@ function M.start_kernel(buf, kernel_name)
         code = "try:\n    get_ipython().run_line_magic('matplotlib', 'inline')\nexcept Exception:\n    pass\n",
       }, function() end)
     end
+    -- Tell the LSP about the kernel's interpreter so import resolution
+    -- matches what `pip list` in that env reports.
+    cl:call("list_kernels", {}, function(_, kernels)
+      if not kernels then return end
+      local active = res.kernel_name
+      for _, k in ipairs(kernels) do
+        -- argv is typically ["/path/to/python", "-m", "ipykernel_launcher", ...]
+        -- Lua's 1-based indexing -> argv[1] is the python interpreter.
+        if k.name == active and k.argv and k.argv[1] then
+          local py = k.argv[1]
+          nb.kernel_python_path = py
+          local sp = vim.fn.system({ py, "-c", "import sys; print('\\n'.join(p for p in sys.path if p))" })
+          local extra = {}
+          if vim.v.shell_error == 0 then
+            for line in sp:gmatch("[^\r\n]+") do
+              if line:find("site%-packages") or line:find("dist%-packages") then
+                table.insert(extra, line)
+              end
+            end
+          end
+          nb.kernel_extra_paths = extra
+          vim.schedule(function()
+            M._sync_lsp_python_path(buf, py, extra)
+          end)
+          return
+        end
+      end
+    end)
     Render.refresh(nb, vim.fn.bufwinid(buf))
   end)
 end
@@ -596,6 +866,7 @@ end
 function M.stop_kernel(buf)
   local nb = Notebook.get(buf)
   if not nb then return end
+  nb.kernel_started = false
   ensure_client():call("stop_kernel", { session_id = nb.session_id }, function() end)
 end
 
@@ -681,6 +952,58 @@ function M.restart_kernel(buf)
     if err then vim.notify("restart: " .. tostring(err), vim.log.levels.ERROR); return end
     vim.notify("jupynvim: kernel restarted", vim.log.levels.INFO)
   end)
+end
+
+-- Delete an embedded image (gif/png/jpeg) from the markdown cell under the
+-- cursor. The buffer holds short placeholders like `![alt](jupynvim-img:N)`,
+-- so removing the image is just a matter of dropping that line and re-syncing
+-- the cell source. On save, postprocess() won't find the placeholder and
+-- the original base64 data drops out of the .ipynb on disk.
+function M.delete_image(buf)
+  local nb = Notebook.get(buf)
+  if not nb then return end
+  nb:sync_from_buffer()
+  local lnum = vim.api.nvim_win_get_cursor(0)[1]
+  local cell_id = nb:cell_at_line(lnum)
+  if not cell_id then return end
+  local cell = nb:get_cell(cell_id)
+  if not cell or cell.cell_type ~= "markdown" then
+    vim.notify("jupynvim: not a markdown cell", vim.log.levels.INFO)
+    return
+  end
+  local Embedded = require("jupynvim.embedded")
+  local imgs = Embedded.list_images(cell.id) or {}
+  if #imgs == 0 then
+    vim.notify("jupynvim: no embedded image in this cell", vim.log.levels.INFO)
+    return
+  end
+
+  local function drop(idx)
+    -- Only remove the placeholder line from the buffer / cell.source.
+    -- Leave the side-table entry in place so `u` (undo) restores the line
+    -- AND the image data, both. postprocess() is idempotent: if the
+    -- placeholder isn't in the source on save, the data is dropped from
+    -- the .ipynb; if it's there (after undo), the data is restored.
+    local pat = "%!%[[^%]]*%]%(jupynvim%-img:" .. idx .. "%)\n?"
+    cell.source = (cell.source or ""):gsub(pat, "", 1)
+    pcall(require("jupynvim.image").clear_for_cell, cell.id)
+    M._populate_buffer(nb)
+    Render.refresh(nb, vim.fn.bufwinid(buf))
+    vim.bo[buf].modified = true
+    vim.notify("jupynvim: deleted image " .. idx .. " (undo with `u` to restore)",
+      vim.log.levels.INFO)
+  end
+
+  if #imgs == 1 then
+    drop(imgs[1].idx)
+    return
+  end
+  vim.ui.select(imgs, {
+    prompt = "Delete which image?",
+    format_item = function(im)
+      return string.format("[%d] %s (%s)", im.idx, im.alt ~= "" and im.alt or "(no alt)", im.mime)
+    end,
+  }, function(choice) if choice then drop(choice.idx) end end)
 end
 
 function M.kernel_picker(buf)
@@ -977,6 +1300,8 @@ function M.setup(opts)
   M.config = vim.tbl_extend("force", M.config, opts or {})
   Log.set_level(M.config.log_level)
   Render.setup_highlights()
+  require("jupynvim.diag").setup()
+  require("jupynvim.lsp").setup()
 
   vim.opt.conceallevel = 2
   vim.opt.concealcursor = "nc"
@@ -1022,6 +1347,9 @@ function M.setup(opts)
   vim.api.nvim_create_user_command("JupynvimSaveImage", function(o)
     M.save_image(vim.api.nvim_get_current_buf(), o.args)
   end, { nargs = "?", complete = "file" })
+  vim.api.nvim_create_user_command("JupynvimDeleteImage", function()
+    M.delete_image(vim.api.nvim_get_current_buf())
+  end, {})
   vim.api.nvim_create_user_command("JupynvimOpen", function(o) M.open(o.args) end, { nargs = 1, complete = "file" })
   vim.api.nvim_create_user_command("JupynvimRunCell", function() M.run_cell(0, { advance = false }) end, {})
   vim.api.nvim_create_user_command("JupynvimRunAll", function() M.run_all(0) end, {})
