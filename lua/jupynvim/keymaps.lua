@@ -52,6 +52,8 @@ function M.attach(buf, api)
 
   -- Save the current cell's image to a file. Prompts for a path.
   map(buf, "n", "<leader>nI", function() api.save_image(buf) end, "Save cell image")
+  -- Delete an embedded image from the markdown cell under the cursor.
+  map(buf, "n", "<leader>nD", function() api.delete_image(buf) end, "Delete cell image")
 
   -- Refresh display
   map(buf, "n", "<leader>nL", function() api.refresh(buf) end, "Refresh notebook display")
