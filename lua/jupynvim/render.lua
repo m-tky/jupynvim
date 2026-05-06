@@ -206,7 +206,7 @@ local function build_output_virt_lines(cell, width, nb)
       end
     elseif o.output_type == "execute_result" or o.output_type == "display_data" then
       local data = o.data or {}
-      local has_img = (data["image/png"] ~= nil)
+      local has_img = (data["image/png"] ~= nil) or (data["image/gif"] ~= nil) or (data["image/jpeg"] ~= nil)
       local text = as_str(data["text/plain"])
       -- Hide the boring matplotlib `<Figure size NxM with K Axes>` repr when
       -- the actual image is rendered alongside.
@@ -241,9 +241,13 @@ local function build_output_virt_lines(cell, width, nb)
           end
         end
       end
-      local b64 = data["image/png"]
-      if type(b64) == "table" then b64 = table.concat(b64, "") end
-      if type(b64) == "string" and b64 ~= "" then
+      local b64
+      for _, m in ipairs({ "image/gif", "image/png", "image/jpeg" }) do
+        local v = data[m]
+        if type(v) == "table" then v = table.concat(v, "") end
+        if type(v) == "string" and v ~= "" then b64 = v; break end
+      end
+      if b64 then
         local ph = image.placeholder_virt_lines(cell.id)
         if ph then
           local cols = image.placement_cols(cell.id) or 56
@@ -332,9 +336,19 @@ local function render_cell(nb, cell, range, width, win)
     end
     table.insert(lines_below, { { footer_line(width), HL_BORDER } })
   elseif cell.cell_type == "markdown" then
-    -- Render embedded markdown images (placeholder mode supported)
+    -- Render embedded markdown images (placeholder mode supported).
+    -- Filter to images whose `jupynvim-img:N` token is actually present in
+    -- the current cell source. This way `<leader>nD` (which strips the
+    -- placeholder line but keeps the side-table entry so `u` can restore)
+    -- visually removes the image immediately, and `u` brings it back.
     local Embedded = require("jupynvim.embedded")
-    local imgs = Embedded.list_images(cell.id) or {}
+    local src = cell.source or ""
+    local imgs = {}
+    for _, img in ipairs(Embedded.list_images(cell.id) or {}) do
+      if src:find("jupynvim%-img:" .. img.idx, 1, false) then
+        table.insert(imgs, img)
+      end
+    end
     for _, img in ipairs(imgs) do
       local key = cell.id .. "_md_" .. img.idx
       local ph = image.placeholder_virt_lines(key)
@@ -437,16 +451,16 @@ end
 -- This bypasses Unicode placeholder support which is incomplete in Ghostty 1.3.
 function M.place_images(nb, cell, range, win)
   nb.image_ids = nb.image_ids or {}
-  local b64
+  local b64, mime
   for _, o in ipairs(cell.outputs or {}) do
     if (o.output_type == "execute_result" or o.output_type == "display_data") then
       local d = o.data or {}
-      local v = d["image/png"]
-      if type(v) == "table" then v = table.concat(v, "") end
-      if type(v) == "string" and v ~= "" then
-        b64 = v
-        break
+      for _, m in ipairs({ "image/gif", "image/png", "image/jpeg" }) do
+        local v = d[m]
+        if type(v) == "table" then v = table.concat(v, "") end
+        if type(v) == "string" and v ~= "" then b64 = v; mime = m; break end
       end
+      if b64 then break end
     end
   end
   if not b64 then
@@ -481,7 +495,7 @@ function M.place_images(nb, cell, range, win)
     if not was_cached then
       vim.schedule(function() M.refresh(nb, win) end)
     end
-  end, { renderer = renderer })
+  end, { renderer = renderer, mime = mime })
 end
 
 local function clear_separators(nb, ranges)
