@@ -114,13 +114,54 @@ function M.postprocess(cell_id, processed_source)
   if not entry or not entry.originals or #entry.originals == 0 then
     return processed_source
   end
+  -- Iterate by image entry (not by parallel originals index) so we tolerate
+  -- length mismatches between the two arrays. Use the image's `idx` field
+  -- as the placeholder identity, not the array position.
   local out = processed_source
-  for i = #entry.originals, 1, -1 do
-    local img = entry.images[i]
-    local pat = "%!%[[^%]]*%]%(jupynvim%-img:" .. img.idx .. "%)"
-    out = out:gsub(pat, function() return entry.originals[i] end, 1)
+  for i, img in ipairs(entry.images) do
+    local original = entry.originals[i]
+    if img and original then
+      local pat = "%!%[[^%]]*%]%(jupynvim%-img:" .. img.idx .. "%)"
+      out = out:gsub(pat, function() return original end, 1)
+    end
   end
   return out
+end
+
+-- Like preprocess(), but additive: keeps existing entries / placeholders in
+-- the cell's source intact and only converts NEW data:image URIs (the ones
+-- the user just pasted) into placeholders. Indices for new entries continue
+-- where the existing ones leave off, so old `jupynvim-img:N` references stay
+-- bound to their original base64.
+function M.preprocess_incremental(cell_id, source)
+  if type(source) ~= "string" or source == "" then return source end
+  if not source:find("data:image", 1, true) then return source end
+  local entry = per_cell[cell_id]
+  if not entry then
+    return M.preprocess(cell_id, source)
+  end
+  local max_idx = 0
+  for _, img in ipairs(entry.images) do
+    if img.idx > max_idx then max_idx = img.idx end
+  end
+  local out = {}
+  local pos = 1
+  while true do
+    local found = find_data_uri(source, pos)
+    if not found then
+      table.insert(out, source:sub(pos))
+      break
+    end
+    table.insert(out, source:sub(pos, found.match_start - 1))
+    max_idx = max_idx + 1
+    table.insert(out, string.format("![%s](jupynvim-img:%d)", found.alt, max_idx))
+    table.insert(entry.images, {
+      idx = max_idx, alt = found.alt, mime = found.mime, b64 = found.b64,
+    })
+    table.insert(entry.originals, source:sub(found.match_start, found.match_end))
+    pos = found.match_end + 1
+  end
+  return table.concat(out)
 end
 
 function M.get_image(cell_id, idx)
