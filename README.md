@@ -6,7 +6,7 @@ understands the file. Built on a Rust backend that talks the Jupyter wire
 protocol directly, with no Python remote-plugin layer.
 
 <p align="center">
-  <video src="https://github.com/sheng-tse/jupynvim/raw/main/examples/demo.mp4" controls loop muted autoplay playsinline width="900"></video>
+  <video src="https://github.com/sheng-tse/jupynvim/releases/download/v0.1.0/demo.mp4" controls loop muted autoplay playsinline width="900"></video>
 </p>
 
 ## Highlights
@@ -227,24 +227,31 @@ Treesitter is also restricted to code-cell byte ranges via
 ## Architecture
 
 ```
-Neovim (Lua)               Rust backend (jupynvim-core)            Kernel
-─────────────              ───────────────────────────             ──────
-buffer/extmarks    ⟷    msgpack-rpc / stdio    ⟷       ZMQ/HMAC    ⟷  ipykernel
-Kitty graphics             jupyter wire protocol
-                           nbformat v4 read/write
-                           kernelspec discovery
+  Neovim (Lua frontend)
+           |
+           |  msgpack-rpc over stdio
+           v
+  jupynvim-core (Rust backend)
+           |
+           |  ZMQ + HMAC-SHA256, Jupyter wire protocol
+           v
+         ipykernel
 ```
 
-The Lua frontend hijacks `*.ipynb` via `BufReadCmd`, renders cells with
-virtual-line borders, transmits PNG bytes via the Kitty graphics protocol
-straight to `/dev/tty`, drives gif animation on a `vim.loop` timer, and
-owns keymaps and commands.
+The Lua frontend also writes Kitty graphics escapes straight to
+`/dev/tty` for inline image rendering, bypassing both the backend and
+Neovim's own draw pipeline.
 
-The Rust backend runs one async task per ZMQ socket so `send` and `recv`
-don't conflict, HMAC-SHA256 signs every message, parses and serializes
-`.ipynb` (nbformat v4) preserving unknown fields, routes iopub events to
-cells via `parent_msg_id`, and decomposes animated GIFs into a frame
-sequence with ImageMagick.
+The Lua side hijacks `*.ipynb` via `BufReadCmd`, renders cells with
+virtual-line borders, transmits PNG bytes via the Kitty graphics
+protocol, drives gif animation on a `vim.loop` timer, and owns keymaps
+and commands.
+
+The Rust backend runs one async task per ZMQ socket so `send` and
+`recv` don't conflict, HMAC-SHA256 signs every message, parses and
+serializes `.ipynb` (nbformat v4) preserving unknown fields, routes
+iopub events to cells via `parent_msg_id`, and decomposes animated
+GIFs into a frame sequence with ImageMagick.
 
 ## Logs
 
