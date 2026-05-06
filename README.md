@@ -5,11 +5,10 @@ borders, inline images, real Jupyter kernels, and an LSP that actually
 understands the file. Built on a Rust backend that talks the Jupyter wire
 protocol directly, with no Python remote-plugin layer.
 
+<!-- demo video goes here once uploaded via web UI -->
 <p align="center">
-  <img src="examples/demo.gif" alt="jupynvim demo" width="900">
+  <a href="examples/demo.mp4">▶ watch the demo (90s)</a>
 </p>
-
-> Higher quality version: [`examples/demo.mp4`](examples/demo.mp4).
 
 ## Highlights
 
