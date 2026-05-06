@@ -6,11 +6,8 @@ understands the file. Built on a Rust backend that talks the Jupyter wire
 protocol directly, with no Python remote-plugin layer.
 
 <p align="center">
-  <video src="examples/demo.mp4" controls loop muted autoplay playsinline width="900"></video>
+  <video src="https://github.com/sheng-tse/jupynvim/raw/main/examples/demo.mp4" controls loop muted autoplay playsinline width="900"></video>
 </p>
-
-> If GitHub doesn't auto-play the video above, click
-> [`examples/demo.mp4`](examples/demo.mp4).
 
 ## Highlights
 
@@ -57,7 +54,7 @@ With [`lazy.nvim`](https://github.com/folke/lazy.nvim):
 
 ```lua
 {
-  "shengtselin/jupynvim",
+  "sheng-tse/jupynvim",
   build = function()
     local core = vim.fn.stdpath("data") .. "/lazy/jupynvim/core"
     vim.fn.system({
