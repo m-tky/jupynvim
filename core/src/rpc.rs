@@ -300,6 +300,12 @@ impl Server {
 
         {
             let mut slot = session.kernel.write().await;
+            // Drop alone doesn't kill the child process — only Kernel::kill
+            // does. Without explicit kill, re-calling start_kernel orphans
+            // the previous ipykernel_launcher (process leak).
+            if let Some(old) = slot.take() {
+                let _ = old.kill().await;
+            }
             *slot = Some(kernel);
         }
 
