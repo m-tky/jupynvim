@@ -26,3 +26,4 @@ kernel-*.json
 
 # Test scratch
 tests/.tmp/
+examples/*.mp4

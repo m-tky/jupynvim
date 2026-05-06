@@ -5,10 +5,7 @@ borders, inline images, real Jupyter kernels, and an LSP that actually
 understands the file. Built on a Rust backend that talks the Jupyter wire
 protocol directly, with no Python remote-plugin layer.
 
-<!-- demo video goes here once uploaded via web UI -->
-<p align="center">
-  <a href="examples/demo.mp4">▶ watch the demo (90s)</a>
-</p>
+https://github.com/user-attachments/assets/36bdca18-c964-423c-8c99-6f243d4ac1b2
 
 ## Highlights
 
