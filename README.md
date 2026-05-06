@@ -6,8 +6,10 @@ understands the file. Built on a Rust backend that talks the Jupyter wire
 protocol directly, with no Python remote-plugin layer.
 
 <p align="center">
-  <video src="https://github.com/sheng-tse/jupynvim/releases/download/v0.1.0/demo.mp4" controls loop muted autoplay playsinline width="900"></video>
+  <img src="examples/demo.gif" alt="jupynvim demo" width="900">
 </p>
+
+> Higher quality version: [`examples/demo.mp4`](examples/demo.mp4).
 
 ## Highlights
 
