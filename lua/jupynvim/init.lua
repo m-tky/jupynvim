@@ -234,6 +234,16 @@ function M.open(path, opts)
     pcall(vim.cmd, "runtime! ftplugin/" .. ft .. ".vim")
     pcall(vim.cmd, "runtime! ftplugin/" .. ft .. "/*.vim")
     pcall(vim.cmd, "runtime! indent/" .. ft .. ".vim")
+    -- nvim-treesitter binds indentexpr to nvim_treesitter#indent() during
+    -- FileType. That function consults the parse tree, which we
+    -- periodically invalidate via set_included_regions, so Enter after `:`
+    -- sometimes drops the indent until the tree re-parses. The runtime
+    -- indent file (e.g. python#GetPythonIndent) is regex-based and
+    -- doesn't depend on treesitter state, so re-asserting it here gives
+    -- consistent autoindent.
+    if ft == "python" then
+      pcall(function() vim.bo[buf].indentexpr = "python#GetPythonIndent(v:lnum)" end)
+    end
   end)
 
   -- Look up the kernel python BEFORE LSP attaches so we can inject
@@ -430,6 +440,20 @@ function M._sync_treesitter_ranges(nb)
       })
     end
   end
+  -- Skip set_included_regions when the cell structure (row boundaries)
+  -- hasn't changed. Byte offsets shift on every keystroke, but treesitter's
+  -- own incremental parser handles intra-line edits inside an existing
+  -- region. Re-setting regions here would force a full tree invalidation
+  -- on each keystroke, which races with indentexpr (treesitter indent
+  -- returns -1 against an invalidated tree, so Enter after `:` falls back
+  -- to plain autoindent). Compare row boundaries only.
+  local row_sig = {}
+  for i, region in ipairs(regions) do
+    row_sig[i] = region[1][1] .. ":" .. region[1][4]
+  end
+  local sig = table.concat(row_sig, ",")
+  if nb._ts_regions_sig == sig then return end
+  nb._ts_regions_sig = sig
   pcall(parser.set_included_regions, parser, regions)
 end
 
