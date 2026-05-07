@@ -1346,6 +1346,24 @@ function M.setup(opts)
       local abs = vim.fn.fnamemodify(args.file, ":p")
       local b = vim.fn.bufnr(abs)
       local force = b > 0 and Notebook.get(b) ~= nil
+      -- Pre-populate the buffer with the on-disk file's line count of empty
+      -- placeholder lines BEFORE scheduling M.open. Plugins that grep the
+      -- raw .ipynb json and then call nvim_win_set_cursor on a matched line
+      -- (snacks.nvim picker, telescope grep_string, etc.) fire immediately
+      -- after BufReadCmd. Without placeholders the buffer is empty and the
+      -- cursor set fails with "Cursor position outside buffer". M.open then
+      -- overwrites with rendered cells.
+      local f = io.open(abs, "r")
+      if f then
+        local count = 0
+        for _ in f:lines() do count = count + 1 end
+        f:close()
+        if count > 0 then
+          local lines = {}
+          for _ = 1, count do lines[#lines + 1] = "" end
+          pcall(vim.api.nvim_buf_set_lines, args.buf, 0, -1, false, lines)
+        end
+      end
       vim.schedule(function() M.open(args.file, { force = force }) end)
     end,
   })
