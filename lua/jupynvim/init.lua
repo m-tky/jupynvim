@@ -238,11 +238,10 @@ function M.open(path, opts)
     -- FileType. That function consults the parse tree, which we
     -- periodically invalidate via set_included_regions, so Enter after `:`
     -- sometimes drops the indent until the tree re-parses. The runtime
-    -- indent file (e.g. python#GetPythonIndent) is regex-based and
-    -- doesn't depend on treesitter state, so re-asserting it here gives
-    -- consistent autoindent.
+    -- indent file's python#GetIndent is regex-based and doesn't depend on
+    -- treesitter state, so re-asserting it here gives consistent autoindent.
     if ft == "python" then
-      pcall(function() vim.bo[buf].indentexpr = "python#GetPythonIndent(v:lnum)" end)
+      pcall(function() vim.bo[buf].indentexpr = "python#GetIndent(v:lnum)" end)
     end
   end)
 
@@ -471,6 +470,12 @@ function M._attach_autocmds(buf)
         local want_ft = vim.b[buf].jupynvim_filetype or "python"
         if vim.bo[buf].filetype ~= want_ft then
           vim.bo[buf].filetype = want_ft
+        end
+        -- Re-assert vim's regex-based indent so nvim-treesitter's
+        -- FileType handler (which fires when filetype is set) doesn't
+        -- silently rebind indentexpr to its parse-tree-dependent version.
+        if want_ft == "python" then
+          pcall(function() vim.bo[buf].indentexpr = "python#GetIndent(v:lnum)" end)
         end
         local wins = vim.fn.win_findbuf(buf)
         for _, win in ipairs(wins) do
