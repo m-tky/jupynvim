@@ -176,18 +176,48 @@ local function process_cr(s)
   return table.concat(out, "\n")
 end
 
--- Compact a tqdm progress bar: shorten the long block-char run.
--- Matches `[NUM]%|<bar>| ...` patterns.
+-- Compact a tqdm progress bar: shorten the long block-char run while
+-- preserving the actual progress fraction. Matches `[NUM]%|<bar>| ...`
+-- and uses the n/m count from the rest of the line when available
+-- (the percentage rounds to 0% well past 1% of progress on huge
+-- denominators, so n/m is more accurate).
+local PARTIAL_BLOCKS = { "▏", "▎", "▍", "▌", "▋", "▊", "▉" }
+
 local function compact_tqdm(line)
-  -- Pattern: optional spaces, NUM%, |, blocks/spaces, |, rest
   local prefix, bar, rest = line:match("^(%s*%d+%%)|(.-)|(.*)$")
   if not prefix or not bar then return line end
-  -- If bar contains tqdm block chars, shorten to a fixed display
-  if bar:match("[█▏▎▍▌▋▊▉ ]") then
-    local short = "███████████████"  -- fixed 15-cell bar
-    return prefix .. "|" .. short .. "|" .. rest
+  if not bar:match("[█▏▎▍▌▋▊▉ ]") then return line end
+
+  local total = 15
+  local frac
+  local n, m = rest:match("(%d+)/(%d+)")
+  if n and m then
+    local nm = tonumber(m)
+    if nm and nm > 0 then
+      frac = tonumber(n) / nm
+    end
   end
-  return line
+  if not frac then
+    frac = (tonumber(prefix:match("(%d+)")) or 0) / 100
+  end
+  if frac < 0 then frac = 0 end
+  if frac > 1 then frac = 1 end
+
+  local exact = frac * total
+  local full = math.floor(exact)
+  local rem = exact - full
+  local idx = math.floor(rem * 8 + 0.5)
+  local short
+  if idx >= 8 then
+    full = math.min(full + 1, total)
+    short = string.rep("█", full) .. string.rep(" ", total - full)
+  elseif idx > 0 and full < total then
+    short = string.rep("█", full) .. PARTIAL_BLOCKS[idx]
+      .. string.rep(" ", total - full - 1)
+  else
+    short = string.rep("█", full) .. string.rep(" ", total - full)
+  end
+  return prefix .. "|" .. short .. "|" .. rest
 end
 
 local function build_output_virt_lines(cell, width, nb)
