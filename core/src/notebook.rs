@@ -64,8 +64,18 @@ impl Notebook {
     }
 
     pub fn read(path: &Path) -> Result<Self> {
+        // Treat a non-existent or empty file as a fresh notebook. Common
+        // workflows like `touch foo.ipynb && nvim foo.ipynb` would otherwise
+        // hit the json parser with zero bytes and fail with a confusing
+        // "EOF while parsing" error.
+        if !path.exists() {
+            return Ok(Self::empty());
+        }
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("read {}", path.display()))?;
+        if raw.trim().is_empty() {
+            return Ok(Self::empty());
+        }
         Self::from_json(&raw)
     }
 
