@@ -238,9 +238,14 @@ local function build_output_virt_lines(cell, width, nb)
       local data = o.data or {}
       local has_img = (data["image/png"] ~= nil) or (data["image/gif"] ~= nil) or (data["image/jpeg"] ~= nil)
       local text = as_str(data["text/plain"])
-      -- Hide the boring matplotlib `<Figure size NxM with K Axes>` repr when
-      -- the actual image is rendered alongside.
-      if has_img and (text == "" or text:match("^<[Ff]igure ")) then
+      -- Hide the boring repr when the actual image is rendered alongside:
+      --   `<Figure size NxM with K Axes>`     — matplotlib figure
+      --   `<IPython.core.display.Image object>` and similar — explicit Image()
+      -- The `^<...object>$` pattern covers anything that's just a Python repr.
+      if has_img and (text == ""
+          or text:match("^<[Ff]igure ")
+          or text:match("^<[%w._]+ object>$")
+          or text:match("^<[%w._]+ object at 0x[%x]+>$")) then
         text = ""
       end
       -- If text/plain is just the boring object repr, try extracting visible

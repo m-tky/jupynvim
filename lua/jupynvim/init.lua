@@ -610,9 +610,20 @@ function M._attach_autocmds(buf)
       local Embedded = require("jupynvim.embedded")
       local needs_repop = false
       for _, c in ipairs(nb.cells) do
+        -- Only repop when preprocess_incremental ACTUALLY rewrites the
+        -- source (i.e. found a real `![alt](data:image/...;base64,...)` URI
+        -- that needs replacing with a placeholder). Just having the literal
+        -- string "data:image" inside descriptive text or fenced code does
+        -- not require a repop. _populate_buffer resets modified=false, so
+        -- spurious repops silently throw away the user's pending changes
+        -- when :qa or :wqa runs next.
         if c.cell_type == "markdown" and c.source and c.source:find("data:image", 1, true) then
-          c.source = Embedded.preprocess_incremental(c.id, c.source)
-          needs_repop = true
+          local before = c.source
+          local after = Embedded.preprocess_incremental(c.id, c.source)
+          if after ~= before then
+            c.source = after
+            needs_repop = true
+          end
         end
       end
       if needs_repop then
@@ -620,6 +631,10 @@ function M._attach_autocmds(buf)
         M._populate_buffer(nb)
         pcall(vim.api.nvim_win_set_cursor, 0,
           { math.min(cur[1], vim.api.nvim_buf_line_count(buf)), cur[2] })
+        -- We just rewrote the buffer to swap a pasted data:URI with the
+        -- short placeholder; that's a real edit, not a no-op. Keep the
+        -- modified flag set so :wqa actually triggers BufWriteCmd.
+        pcall(vim.api.nvim_buf_set_option, buf, "modified", true)
       end
       Render.refresh(nb, vim.fn.bufwinid(buf))
       M._sync_treesitter_ranges(nb)
@@ -871,19 +886,36 @@ function M.set_cell_type(buf, t)
   local lnum = vim.api.nvim_win_get_cursor(0)[1]
   local cur_id = nb:cell_at_line(lnum)
   if not cur_id then return end
+  local cell = nb:get_cell(cur_id)
+  if not cell then return end
+  if cell.cell_type == t then return end
+  -- Update local state synchronously. Doing this in the RPC callback meant a
+  -- :w fired immediately after <leader>nm raced the callback and saved the
+  -- old type. Buffer text doesn't change so we also have to flip `modified`
+  -- by hand or :wqa skips the buffer entirely.
+  cell.cell_type = t
+  if t ~= "code" then cell.outputs = {}; cell.execution_count = nil end
+  pcall(vim.api.nvim_buf_set_option, buf, "modified", true)
+  M._sync_treesitter_ranges(nb)
+  Render.refresh(nb, vim.fn.bufwinid(buf))
+  -- LSPs aren't notified of cell-type changes (no didChange fires - the
+  -- buffer text is unchanged), so any diagnostics they published while the
+  -- cell was code remain in the diagnostic store and stay visible on the
+  -- now-markdown lines. Re-call show() so our diag.filter runs against the
+  -- updated cell types and the stale diagnostics get hidden.
+  vim.schedule(function()
+    if vim.api.nvim_buf_is_valid(buf) then
+      pcall(vim.diagnostic.show, nil, buf)
+    end
+  end)
+  -- Backend sync as a side effect. _save's replace_cells already propagates
+  -- the type on next save, so this is mostly to keep the in-memory backend
+  -- model consistent for read-side RPCs (kernel completion, debug dumps).
   local cl = ensure_client()
   cl:call("set_cell_type", { session_id = nb.session_id, cell_id = cur_id, cell_type = t }, function(err)
-    if err then return end
-    local cell = nb:get_cell(cur_id)
-    if cell then
-      cell.cell_type = t
-      if t ~= "code" then cell.outputs = {}; cell.execution_count = nil end
+    if err then
+      vim.notify("set_cell_type backend sync failed: " .. tostring(err), vim.log.levels.WARN)
     end
-    -- Toggling cell type changes which line ranges should be parsed as the
-    -- kernel language by treesitter. Without re-syncing the included regions,
-    -- a markdown→code switch leaves the new code cell uncolored.
-    M._sync_treesitter_ranges(nb)
-    Render.refresh(nb, vim.fn.bufwinid(buf))
   end)
 end
 
