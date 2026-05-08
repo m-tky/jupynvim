@@ -26,4 +26,7 @@ kernel-*.json
 
 # Test scratch
 tests/.tmp/
-examples/*.mp4
+
+# examples/ is a personal playground for users; keep it untracked so people
+# can drop their own .ipynb files in there without polluting the repo.
+examples/
