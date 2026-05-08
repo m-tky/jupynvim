@@ -101,6 +101,35 @@ pub fn discover_by_name(name: &str) -> Option<KernelSpec> {
     discover_all().into_iter().find(|s| s.name == name)
 }
 
+/// Resolve a kernelspec name with sensible fallbacks.
+///
+/// Match priority:
+///   1. Exact name match (`julia-1.12` → `julia-1.12`).
+///   2. Prefix-with-dash match (`julia` → `julia-1.12` if installed).
+///      Catches notebooks saved without a version suffix.
+///   3. Language match (notebook says language="julia" but no exact / prefix
+///      kernel found → use the first installed kernel whose language matches).
+///      Lets a notebook from a 1.10 user open cleanly on a machine with only
+///      1.12 installed, even if name and prefix both differ.
+/// Returns None if nothing matches.
+pub fn discover_with_fallback(name: &str, language: Option<&str>) -> Option<KernelSpec> {
+    let all = discover_all();
+    if let Some(s) = all.iter().find(|s| s.name == name) {
+        return Some(s.clone());
+    }
+    let prefix = format!("{name}-");
+    if let Some(s) = all.iter().find(|s| s.name.starts_with(&prefix)) {
+        return Some(s.clone());
+    }
+    if let Some(lang) = language {
+        let lang_lower = lang.to_lowercase();
+        if let Some(s) = all.iter().find(|s| s.language.to_lowercase() == lang_lower) {
+            return Some(s.clone());
+        }
+    }
+    None
+}
+
 fn load_one(name: &str, dir: &PathBuf) -> Result<KernelSpec> {
     let kj_path = dir.join("kernel.json");
     let raw = std::fs::read_to_string(&kj_path)

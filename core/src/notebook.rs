@@ -125,6 +125,24 @@ impl Notebook {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
     }
+
+    /// Best guess at the notebook's language. Tries kernelspec.language first,
+    /// then falls back to language_info.name. Used to find a fallback kernel
+    /// when the exact name from kernelspec.name isn't installed.
+    pub fn kernel_language(&self) -> Option<String> {
+        self.metadata
+            .get("kernelspec")
+            .and_then(|k| k.get("language"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| {
+                self.metadata
+                    .get("language_info")
+                    .and_then(|k| k.get("name"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
+    }
 }
 
 impl Cell {

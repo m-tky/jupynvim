@@ -289,8 +289,14 @@ impl Server {
             .or_else(|| session.notebook.read().kernel_name())
             .unwrap_or_else(|| "python3".to_string());
 
-        let spec = kernelspec::discover_by_name(&name)
-            .ok_or_else(|| anyhow!("kernelspec '{name}' not found"))?;
+        // Resolve with version-tolerant fallback so a notebook saved with
+        // kernelspec name "julia" or "julia-1.10" still opens on a machine
+        // with only julia-1.12 installed. Same for python3 vs python3.13,
+        // ir vs ir-r-4.5, etc. The notebook's metadata language gives us a
+        // last-resort hint for cross-version mismatch.
+        let language = session.notebook.read().kernel_language();
+        let spec = kernelspec::discover_with_fallback(&name, language.as_deref())
+            .ok_or_else(|| anyhow!("no kernelspec found for '{name}' (and no fallback by language)"))?;
 
         let cwd = session.path.parent().map(|p| p.to_path_buf());
         let kernel = Kernel::launch(spec, cwd).await?;
