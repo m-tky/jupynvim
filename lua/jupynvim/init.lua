@@ -222,6 +222,17 @@ function M.open(path, opts)
     vim.cmd("setlocal signcolumn=no conceallevel=2 concealcursor=nc wrap linebreak breakindent breakindentopt=min:2 nofoldenable foldmethod=manual")
     vim.cmd([[setlocal showbreak=\ ]])
   end)
+  -- Cursor to top of the rendered notebook. The BufReadCmd pre-populates
+  -- the buffer with one placeholder line per on-disk json line so plugins
+  -- like snacks picker can call nvim_win_set_cursor without "outside
+  -- buffer" errors. After _populate_buffer replaces those placeholders
+  -- with the shorter rendered content, the cursor would otherwise be
+  -- stuck at a high line number and clamped to the last line, leaving
+  -- the view scrolled down. Anchor at (1, 0) so we at least land on the
+  -- first source line. The cell header `virt_lines_above` of line 1 is
+  -- a known limitation - clipped above the window's top edge until the
+  -- user scrolls up. Acceptable trade-off vs. a phantom-line refactor.
+  pcall(vim.api.nvim_win_set_cursor, cur_win, { 1, 0 })
 
   -- Set filetype AFTER buffer display + window setup so FileType-driven
   -- plugins (treesitter, snippets, copilot) see a fully-prepared buffer.
@@ -275,6 +286,14 @@ function M.open(path, opts)
   nb.kernel_python_path = py_path
   nb.kernel_extra_paths = extra_paths
   M._attach_lsp(buf, ft, py_path, extra_paths)
+  -- Kernel-backed completion + hover via virtual LSP. Language-agnostic:
+  -- the kernel's complete_request/inspect_request handle the actual work,
+  -- so the same code path serves Python, Julia, R, anything with a kernel.
+  pcall(function()
+    require("jupynvim.kernel_lsp").attach(buf,
+      function() return Notebook.get(buf) end,
+      function() return M.client end)
+  end)
 
   Render.refresh(nb, cur_win)
   M._opening[abs] = nil
@@ -335,9 +354,16 @@ function M._attach_lsp(buf, ft, py_path, extra_paths)
       and (not config.filetypes or vim.tbl_contains(config.filetypes, ft))
     if ft_ok then
       local cfg = vim.deepcopy(config)
-      -- Force Full sync so didChange routes through _buf_get_full_text
-      -- (patched in jupynvim.lsp to blank out non-code lines).
-      require("jupynvim.lsp").force_full_sync(cfg)
+      -- Force Full sync ONLY for Python LSPs. The cleaned-text patch in
+      -- jupynvim.lsp's _buf_get_full_text only blanks markdown for Python
+      -- (basedpyright would otherwise parse markdown as code), and Full
+      -- sync routes didChange through that patch. For Julia/R/etc. there's
+      -- no cleaning to apply, and forcing Full sync can destabilise some
+      -- servers (julials dies on startup with Full sync). Default to
+      -- whatever sync the server announces.
+      if name == "basedpyright" or name == "pyright" or name == "pylsp" or name == "ruff" then
+        require("jupynvim.lsp").force_full_sync(cfg)
+      end
       -- Inject the kernel's interpreter AND its real site-packages dirs.
       -- pythonPath alone is not enough for basedpyright because it probes
       -- <pythonPath>/../lib for site-packages instead of running the
@@ -358,6 +384,28 @@ function M._attach_lsp(buf, ft, py_path, extra_paths)
           },
         })
       end
+      -- For Mason's julials wrapper: the wrapper script hard-fails with
+      -- "Usage: julia-lsp <julia-env-path>" when launched without an env
+      -- path. nvim-lspconfig + mason-lspconfig set this via a before_init
+      -- hook, but in our manual vim.lsp.start path before_init's mutation
+      -- of cfg.cmd doesn't always reach the process spawn. Resolve the env
+      -- path ourselves and set cfg.cmd directly so the spawn always sees it.
+      if name == "julials" then
+        if not cfg.julia_env_path then
+          local home = vim.env.HOME or os.getenv("HOME")
+          if home then
+            local guess = home .. "/.julia/environments"
+            local entries = vim.fn.glob(guess .. "/v*", true, true)
+            table.sort(entries, function(a, b) return a > b end)  -- newest first
+            if entries[1] and vim.fn.isdirectory(entries[1]) == 1 then
+              cfg.julia_env_path = entries[1]
+            end
+          end
+        end
+        if cfg.julia_env_path then
+          cfg.cmd = { "julia-lsp", vim.fn.expand(cfg.julia_env_path) }
+        end
+      end
       local opts = {
         bufnr = buf,
         -- Don't reuse a client that may have been started earlier for a .py
@@ -366,17 +414,46 @@ function M._attach_lsp(buf, ft, py_path, extra_paths)
         reuse_client = py_path and function() return false end or cfg.reuse_client,
         _root_markers = cfg.root_markers,
       }
+      -- Fallback root_dir for servers whose strict root_markers don't match.
+      -- Mason's julia-lsp wrapper hard-fails without an env-path argument
+      -- (which nvim-lspconfig builds from root_dir), so we'd see "Client
+      -- julials quit with exit code 1" for any notebook outside a Julia
+      -- project. Use the buffer's directory as a last resort so the LSP
+      -- always has SOME root to work with. Only applies if the config didn't
+      -- already specify a root_dir.
+      local function resolve_root(root_dir)
+        if not root_dir or root_dir == "" then
+          local bufpath = vim.api.nvim_buf_get_name(buf)
+          if bufpath ~= "" then
+            root_dir = vim.fs.dirname(bufpath)
+          end
+        end
+        return root_dir
+      end
+      local function start_with_log()
+        local ok, res = pcall(lsp.start, cfg, opts)
+        if not ok then
+          vim.schedule(function()
+            vim.notify(("jupynvim LSP %s: %s"):format(name, tostring(res)),
+              vim.log.levels.WARN)
+          end)
+        end
+      end
       if type(cfg.root_dir) == "function" then
         cfg.root_dir(buf, function(root_dir)
-          cfg.root_dir = root_dir
+          cfg.root_dir = resolve_root(root_dir)
           vim.schedule(function()
-            if vim.api.nvim_buf_is_valid(buf) then
-              pcall(lsp.start, cfg, opts)
-            end
+            if vim.api.nvim_buf_is_valid(buf) then start_with_log() end
           end)
         end)
       else
-        pcall(lsp.start, cfg, opts)
+        if not cfg.root_dir and cfg.root_markers then
+          local found = vim.fs.root(buf, cfg.root_markers)
+          cfg.root_dir = resolve_root(found)
+        elseif not cfg.root_dir then
+          cfg.root_dir = resolve_root(nil)
+        end
+        start_with_log()
       end
     end
   end
@@ -1062,11 +1139,28 @@ local function _open_output_split(buf, cell, origin_line)
     s = s:gsub("\27.", "")
     return s
   end
+  -- Apply tqdm/progress-bar carriage-return semantics: \r overwrites the
+  -- current line, so only the LAST \r-terminated chunk per logical line
+  -- survives. Without this, the scratch split shows every intermediate
+  -- progress-bar tick as its own line (the inline view already applies
+  -- this in render.lua's process_cr).
+  local function process_cr(s)
+    local out = {}
+    for chunk in (s .. "\n"):gmatch("([^\n]*)\n") do
+      local segments = {}
+      for seg in (chunk .. "\r"):gmatch("([^\r]*)\r") do
+        table.insert(segments, seg)
+      end
+      table.insert(out, segments[#segments] or "")
+    end
+    if out[#out] == "" then table.remove(out) end
+    return table.concat(out, "\n")
+  end
 
   local lines = {}
   for _, o in ipairs(cell.outputs) do
     if o.output_type == "stream" then
-      local txt = strip_ansi(as_str(o.text))
+      local txt = strip_ansi(process_cr(as_str(o.text)))
       for line in (txt .. "\n"):gmatch("([^\n]*)\n") do
         table.insert(lines, line)
       end
@@ -1084,7 +1178,7 @@ local function _open_output_split(buf, cell, origin_line)
     elseif o.output_type == "error" then
       table.insert(lines, as_str(o.ename) .. ": " .. as_str(o.evalue))
       for _, tb in ipairs(o.traceback or {}) do
-        local txt = strip_ansi(as_str(tb))
+        local txt = strip_ansi(process_cr(as_str(tb)))
         for line in (txt .. "\n"):gmatch("([^\n]*)\n") do
           table.insert(lines, line)
         end
