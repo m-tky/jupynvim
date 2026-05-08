@@ -205,6 +205,8 @@ impl Server {
             "restart_kernel" => self.restart_kernel(p).await,
             "execute" => self.execute(p).await,
             "execute_silent" => self.execute_silent(p).await,
+            "complete" => self.complete(p).await,
+            "inspect" => self.inspect(p).await,
             "update_cell_source" => self.update_cell_source(p).await,
             "set_cell_type" => self.set_cell_type(p).await,
             "insert_cell" => self.insert_cell(p).await,
@@ -416,6 +418,35 @@ impl Server {
         let msg_id = uuid::Uuid::new_v4().to_string();
         kernel.execute_with_id_opts(code, msg_id.clone(), true, false).await?;
         Ok(json!({ "msg_id": msg_id }))
+    }
+
+    async fn complete(&self, p: Json) -> Result<Json> {
+        let sid = p.get("session_id").and_then(|v| v.as_str()).ok_or_else(|| anyhow!("session_id"))?;
+        let code = p.get("code").and_then(|v| v.as_str()).ok_or_else(|| anyhow!("code"))?;
+        let cursor_pos = p
+            .get("cursor_pos")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| anyhow!("cursor_pos"))? as usize;
+        let session = self.sessions.get(sid).ok_or_else(|| anyhow!("no session"))?.clone();
+        let guard = session.kernel.read().await;
+        let kernel = guard.as_ref().ok_or_else(|| anyhow!("kernel not started"))?;
+        let reply = kernel.complete(code, cursor_pos).await?;
+        Ok(reply)
+    }
+
+    async fn inspect(&self, p: Json) -> Result<Json> {
+        let sid = p.get("session_id").and_then(|v| v.as_str()).ok_or_else(|| anyhow!("session_id"))?;
+        let code = p.get("code").and_then(|v| v.as_str()).ok_or_else(|| anyhow!("code"))?;
+        let cursor_pos = p
+            .get("cursor_pos")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| anyhow!("cursor_pos"))? as usize;
+        let detail_level = p.get("detail_level").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
+        let session = self.sessions.get(sid).ok_or_else(|| anyhow!("no session"))?.clone();
+        let guard = session.kernel.read().await;
+        let kernel = guard.as_ref().ok_or_else(|| anyhow!("kernel not started"))?;
+        let reply = kernel.inspect(code, cursor_pos, detail_level).await?;
+        Ok(reply)
     }
 
     async fn update_cell_source(&self, p: Json) -> Result<Json> {

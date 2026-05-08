@@ -5,13 +5,14 @@
 
 use anyhow::{anyhow, Context, Result};
 use bytes::Bytes;
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::process::{Child, Command};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
 use uuid::Uuid;
 use zeromq::{DealerSocket, Socket, SocketRecv, SocketSend, SubSocket, ZmqMessage};
 
@@ -143,6 +144,11 @@ pub struct Kernel {
     iopub_handle: tokio::task::JoinHandle<()>,
     /// Take this once with `take_events()` and drive it from a single consumer task.
     events: Mutex<Option<mpsc::UnboundedReceiver<KernelEvent>>>,
+    /// Outstanding shell requests awaiting their reply, keyed by msg_id.
+    /// `complete` and `inspect` register a oneshot here BEFORE sending so the
+    /// socket owner can deliver the matching reply directly. execute_request
+    /// uses iopub events for streaming output and doesn't wait on this map.
+    pending: Arc<DashMap<String, oneshot::Sender<Value>>>,
 }
 
 impl Kernel {
@@ -192,8 +198,16 @@ impl Kernel {
         // Single owner per shell/control: tokio::select on outgoing channel + socket recv
         let (shell_tx, shell_rx) = mpsc::unbounded_channel::<ZmqMessage>();
         let (control_tx, control_rx) = mpsc::unbounded_channel::<ZmqMessage>();
-        tokio::spawn(socket_owner(shell, shell_rx, key.clone(), tx_shell, "shell"));
-        let _ = tokio::spawn(socket_owner(control, control_rx, key, tx, "control"));
+        let pending: Arc<DashMap<String, oneshot::Sender<Value>>> = Arc::new(DashMap::new());
+        tokio::spawn(socket_owner(
+            shell,
+            shell_rx,
+            key.clone(),
+            tx_shell,
+            "shell",
+            Some(pending.clone()),
+        ));
+        let _ = tokio::spawn(socket_owner(control, control_rx, key, tx, "control", None));
 
         Ok(Self {
             spec,
@@ -204,6 +218,7 @@ impl Kernel {
             control_tx,
             iopub_handle,
             events: Mutex::new(Some(rx)),
+            pending,
         })
     }
 
@@ -251,6 +266,58 @@ impl Kernel {
         let zmsg = frames_to_zmq(frames);
         self.shell_tx.send(zmsg).map_err(|_| anyhow!("shell channel closed"))?;
         Ok(msg_id)
+    }
+
+    /// Send `complete_request` and await the kernel's `complete_reply`.
+    /// Returns the reply content as JSON: `{matches, cursor_start, cursor_end,
+    /// metadata, status}`. Times out at 2s.
+    pub async fn complete(&self, code: &str, cursor_pos: usize) -> Result<Value> {
+        self.shell_request(
+            "complete_request",
+            json!({ "code": code, "cursor_pos": cursor_pos }),
+        )
+        .await
+    }
+
+    /// Send `inspect_request` and await the kernel's `inspect_reply`.
+    /// Returns `{status, found, data, metadata}`. detail_level 0 = brief, 1 = full.
+    pub async fn inspect(&self, code: &str, cursor_pos: usize, detail_level: u8) -> Result<Value> {
+        self.shell_request(
+            "inspect_request",
+            json!({ "code": code, "cursor_pos": cursor_pos, "detail_level": detail_level }),
+        )
+        .await
+    }
+
+    /// Send a shell-channel request that expects a single reply (not iopub
+    /// events). Registers a oneshot in `pending` keyed by msg_id BEFORE the
+    /// frame goes out, so the socket owner can route the reply directly.
+    async fn shell_request(&self, msg_type: &'static str, content: Value) -> Result<Value> {
+        let msg_id = Uuid::new_v4().to_string();
+        let (tx, rx) = oneshot::channel();
+        self.pending.insert(msg_id.clone(), tx);
+
+        let mut msg = Message::new(msg_type, self.session.clone(), content);
+        msg.header.msg_id = msg_id.clone();
+        let key = self.conn.key.as_bytes();
+        let frames = msg.to_frames(key)?;
+        let zmsg = frames_to_zmq(frames);
+        if self.shell_tx.send(zmsg).is_err() {
+            self.pending.remove(&msg_id);
+            return Err(anyhow!("shell channel closed"));
+        }
+
+        match tokio::time::timeout(Duration::from_millis(2000), rx).await {
+            Ok(Ok(reply)) => Ok(reply),
+            Ok(Err(_)) => {
+                self.pending.remove(&msg_id);
+                Err(anyhow!("{msg_type} reply dropped"))
+            }
+            Err(_) => {
+                self.pending.remove(&msg_id);
+                Err(anyhow!("{msg_type} timed out"))
+            }
+        }
     }
 
     pub async fn kernel_info(&self) -> Result<()> {
@@ -357,6 +424,7 @@ async fn socket_owner(
     key: Vec<u8>,
     tx: mpsc::UnboundedSender<KernelEvent>,
     label: &'static str,
+    pending: Option<Arc<DashMap<String, oneshot::Sender<Value>>>>,
 ) {
     loop {
         tokio::select! {
@@ -385,6 +453,15 @@ async fn socket_owner(
                                     .get("msg_id")
                                     .and_then(|v| v.as_str())
                                     .map(|s| s.to_string());
+                                // If a caller is awaiting this msg_id (complete_request,
+                                // inspect_request, etc.), deliver the content directly
+                                // via the oneshot and skip the events-channel path.
+                                if let (Some(map), Some(pid)) = (pending.as_ref(), parent.as_ref()) {
+                                    if let Some((_, sender)) = map.remove(pid) {
+                                        let _ = sender.send(reply.content);
+                                        continue;
+                                    }
+                                }
                                 let status = reply
                                     .content
                                     .get("status")
