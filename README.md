@@ -16,7 +16,9 @@ https://github.com/user-attachments/assets/36bdca18-c964-423c-8c99-6f243d4ac1b2
   only the code lines.
 - Real Jupyter kernels via the wire protocol over ZMQ with HMAC-SHA256.
   Pick any installed kernelspec. Outputs render inside the cell, including
-  text, errors, PNGs, and animated GIFs.
+  text, errors, PNGs, and animated GIFs. Notebooks pinned to a specific
+  kernel version still open when only a related version is installed, via
+  prefix and language fallback.
 - Inline images using the Kitty graphics protocol. Native PNG placement, not
   ASCII art, unless you ask for it. Animated GIFs loop at native speed via
   ImageMagick frame extraction.
@@ -27,6 +29,12 @@ https://github.com/user-attachments/assets/36bdca18-c964-423c-8c99-6f243d4ac1b2
   with the kernel's interpreter so `numpy`, `matplotlib`, and project deps
   resolve. Diagnostics are scoped to code-cell line ranges so markdown text
   doesn't drown you in fake errors.
+- Kernel-driven completion and hover for any language. A virtual LSP proxies
+  the running kernel's `complete_request` and `inspect_request`, so names
+  defined in earlier cells show up in completion and `K` brings up the
+  kernel's own docstring. nvim-cmp and blink.cmp consume it through the
+  standard LSP client. Works for Python, Julia, R, or anything else whose
+  kernel implements those messages.
 - Multi-image markdown cells are supported. `<leader>nD` deletes one image
   and `u` brings it back.
 - One Rust binary, one Lua plugin. No `pynvim`, no `jupyter_client`, no
@@ -36,15 +44,49 @@ https://github.com/user-attachments/assets/36bdca18-c964-423c-8c99-6f243d4ac1b2
 
 - Neovim 0.11 or newer.
 - A Kitty-graphics terminal. Ghostty 1.3 and later, kitty, or WezTerm.
-- Rust toolchain (`cargo`), built once on plugin install.
-- A Jupyter kernel installed for the language you intend to use. For Python
-  that's `pip install ipykernel` inside whatever env you want to run
-  notebooks against.
+- Rust toolchain (`cargo`) only on platforms without a prebuilt binary.
+  Mac arm64 and Linux x86_64 download a prebuilt on install. Other
+  platforms fall back to building locally.
+- A Jupyter kernel installed for the language you intend to use. See below.
 - ImageMagick 7 (`magick`) is required for animated GIF playback. Static
   images work without it.
 
 `chafa` is optional. Install it if you want an ASCII-art fallback for
 terminals without graphics support.
+
+### Kernels
+
+Install the kernel for whichever language you plan to run. jupynvim picks up
+anything that shows in `jupyter kernelspec list`.
+
+```bash
+# Python (one per env you want to use)
+pip install ipykernel
+
+# Julia
+julia -e 'using Pkg; Pkg.add("IJulia")'
+
+# R
+R -e 'install.packages("IRkernel"); IRkernel::installspec()'
+```
+
+Kernel-driven completion and hover work as soon as the kernel is running.
+The editor-side LSPs covered above (basedpyright for Python, `julials` for
+Julia, `r_language_server` for R) are optional and live in your normal
+nvim-lspconfig / mason setup. Install them through `:Mason` like any other
+language server. Julia and R additionally need the underlying language
+package installed in their own runtimes, since mason only ships the
+wrappers:
+
+```julia
+# Julia, inside the project's environment
+using Pkg; Pkg.add("LanguageServer")
+```
+
+```r
+# R
+install.packages("languageserver")
+```
 
 ## Install
 
@@ -53,12 +95,9 @@ With [`lazy.nvim`](https://github.com/folke/lazy.nvim):
 ```lua
 {
   "sheng-tse/jupynvim",
-  build = function()
-    local core = vim.fn.stdpath("data") .. "/lazy/jupynvim/core"
-    vim.fn.system({
-      "cargo", "build", "--release",
-      "--manifest-path", core .. "/Cargo.toml",
-    })
+  build = function(plugin)
+    local install = loadfile(plugin.dir .. "/lua/jupynvim/install.lua")()
+    install.run(plugin)
   end,
   config = function()
     require("jupynvim").setup({
@@ -221,6 +260,14 @@ from `sys.path`, and injects them as `analysis.extraPaths` before
 
 Treesitter is also restricted to code-cell byte ranges via
 `set_included_regions`. Same problem space, different fix point.
+
+The kernel completion and hover layer is a separate attachment. It is not a
+real `Server` process, it is a Lua-defined `vim.lsp.start` config whose
+`cmd` is a function that forwards `textDocument/completion` and
+`textDocument/hover` to the running kernel over msgpack-RPC. The kernel's
+`complete_request` returns the same matches you would see in JupyterLab,
+including names defined in earlier cells of the running session. Standard
+LSP clients pick it up without any plugin-specific glue.
 
 ## Architecture
 
