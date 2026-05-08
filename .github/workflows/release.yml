@@ -22,10 +22,11 @@ jobs:
         include:
           - os: macos-14
             target: aarch64-apple-darwin
-          - os: macos-13
-            target: x86_64-apple-darwin
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+          # x86_64-apple-darwin omitted: macos-13 runners queue slowly on
+          # free tier and Intel mac users fall back to cargo build via
+          # install.lua. Re-add if demand arises.
     steps:
       - uses: actions/checkout@v4
 
