@@ -192,6 +192,38 @@ function M.open(path, opts)
 
   local nb = Notebook.create(buf, abs, sid, snap)
   M._populate_buffer(nb)
+  -- Wipe undo history. BufReadCmd pre-populates the buffer with one empty
+  -- placeholder line per on-disk json line so plugins like snacks picker
+  -- can call nvim_win_set_cursor without "Cursor position outside buffer"
+  -- errors. _populate_buffer then replaces those placeholders with the
+  -- rendered cells. Both writes land in the undo history, so a fresh `u`
+  -- after open jumps back to a buffer of N empty lines under one giant
+  -- "Markdown" cell. Clearing undolevels (then restoring) discards the
+  -- pre-edit history without affecting future edits.
+  do
+    local prev = vim.bo[buf].undolevels
+    vim.bo[buf].undolevels = -1
+    vim.api.nvim_buf_call(buf, function()
+      vim.cmd('exe "normal! a \\<BS>\\<Esc>"')
+    end)
+    vim.bo[buf].undolevels = prev
+    -- The no-op insert/backspace bumps `modified` even though buffer text is
+    -- unchanged. Reset it so :q doesn't prompt to save on a freshly-opened
+    -- file the user hasn't actually edited.
+    vim.bo[buf].modified = false
+  end
+  -- Enable persistent undo so `u` works across nvim sessions. The undo file
+  -- is keyed by the .ipynb absolute path; cell ids in the file are stable
+  -- across opens, so replaying undo entries through replace_cells matches
+  -- cells correctly. Vim's normal-load path auto-reads the undo file, but
+  -- our BufReadCmd hijack bypasses that, so we rundo manually here.
+  vim.bo[buf].undofile = true
+  vim.api.nvim_buf_call(buf, function()
+    local uf = vim.fn.undofile(abs)
+    if uf ~= "" and vim.fn.filereadable(uf) == 1 then
+      pcall(vim.cmd, "silent! rundo " .. vim.fn.fnameescape(uf))
+    end
+  end)
   M._attach_autocmds(buf)
   Keymaps.attach(buf, M)
 
@@ -707,6 +739,18 @@ function M._save(nb)
   end
   if vim.api.nvim_buf_is_valid(nb.buf) then
     vim.api.nvim_buf_set_option(nb.buf, "modified", false)
+    -- Persist undo history to disk. Vim's normal :w would do this for any
+    -- buffer with undofile=true, but our BufWriteCmd handles save manually
+    -- via the backend, bypassing vim's write path. Call wundo so subsequent
+    -- session opens can rundo and restore undo across the gap.
+    if vim.bo[nb.buf].undofile then
+      vim.api.nvim_buf_call(nb.buf, function()
+        local uf = vim.fn.undofile(nb.path)
+        if uf ~= "" then
+          pcall(vim.cmd, "silent! wundo! " .. vim.fn.fnameescape(uf))
+        end
+      end)
+    end
   end
 end
 
