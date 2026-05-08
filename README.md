@@ -261,13 +261,10 @@ from `sys.path`, and injects them as `analysis.extraPaths` before
 Treesitter is also restricted to code-cell byte ranges via
 `set_included_regions`. Same problem space, different fix point.
 
-The kernel completion and hover layer is a separate attachment. It is not a
-real `Server` process, it is a Lua-defined `vim.lsp.start` config whose
-`cmd` is a function that forwards `textDocument/completion` and
-`textDocument/hover` to the running kernel over msgpack-RPC. The kernel's
-`complete_request` returns the same matches you would see in JupyterLab,
-including names defined in earlier cells of the running session. Standard
-LSP clients pick it up without any plugin-specific glue.
+Kernel completion and hover come from a second, virtual LSP. A
+Lua-defined `vim.lsp.start` config forwards `textDocument/completion` and
+`textDocument/hover` to the running kernel over msgpack-RPC, so standard
+LSP clients see kernel matches and docstrings as plain LSP results.
 
 ## Architecture
 
