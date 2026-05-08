@@ -629,6 +629,14 @@ function M._attach_autocmds(buf)
     callback = function()
       local nb = Notebook.get(buf)
       if not nb then return end
+      -- Force modified=true on every text-altering event. Vim's automatic
+      -- modified tracking depends on a saved-tick reference that we never
+      -- update because BufWriteCmd bypasses the normal :w path. After `u`
+      -- to undo previous-session edits, vim sometimes leaves modified=false
+      -- even though the buffer differs from on-disk content, so :wqa skips
+      -- the buffer entirely. Forcing the flag here makes :wqa always pick
+      -- up real text changes; _save resets it once the backend has written.
+      pcall(vim.api.nvim_buf_set_option, buf, "modified", true)
       -- Sync cell.source from buffer so render's content-driven filters
       -- (e.g., markdown image placeholder presence) reflect undo/redo
       -- restoring text. Without this, `u` brings the line back visually
