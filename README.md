@@ -50,6 +50,15 @@ https://github.com/user-attachments/assets/36bdca18-c964-423c-8c99-6f243d4ac1b2
 - A Jupyter kernel installed for the language you intend to use. See below.
 - ImageMagick 7 (`magick`) is required for animated GIF playback. Static
   images work without it.
+- For tmux users: enable Kitty-graphics passthrough in your tmux config:
+
+  ```tmux
+  set -g allow-passthrough on
+  ```
+
+  Without this, image cells render as blank space because tmux drops the
+  Kitty graphics escapes. Set `JUPYNVIM_DISABLE_TMUX_PASSTHROUGH=1` if
+  you have `TMUX` set but are not actually inside a multiplexer.
 
 `chafa` is optional. Install it if you want an ASCII-art fallback for
 terminals without graphics support.
