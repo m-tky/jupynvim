@@ -155,7 +155,23 @@ local function resolve_tty()
   return _resolved_tty
 end
 
+-- tmux's `allow-passthrough on` only forwards escapes that arrive wrapped as
+-- `ESC P tmux ; <body with internal ESCs doubled> ESC \`. Raw Kitty graphics
+-- escapes get dropped silently otherwise. The Rust backend wraps its own TTY
+-- writes (core/src/kitty.rs); per-frame GIF animation goes through THIS Lua
+-- function, so it needs the same treatment or static images render but gifs
+-- don't animate inside tmux.
+local IN_TMUX = (vim.env.TMUX ~= nil and vim.env.TMUX ~= "")
+  and not (vim.env.JUPYNVIM_DISABLE_TMUX_PASSTHROUGH ~= nil
+           and vim.env.JUPYNVIM_DISABLE_TMUX_PASSTHROUGH ~= "")
+
+local function tmux_wrap(s)
+  local doubled = s:gsub("\27", "\27\27")
+  return "\27Ptmux;" .. doubled .. "\27\\"
+end
+
 local function tty_write(s)
+  if IN_TMUX then s = tmux_wrap(s) end
   local uv = vim.uv or vim.loop
 
   -- 1) chansend(vim.v.stderr, ...) — this is what image.nvim uses. vim.v.stderr

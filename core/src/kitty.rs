@@ -31,6 +31,10 @@ pub struct KittyTty {
 
 struct KittyTtyInner {
     path: PathBuf,
+    // True when nvim runs inside tmux and we need to wrap escapes in tmux's
+    // DCS passthrough format. Cached at open time because the TMUX env var
+    // doesn't change at runtime within a session.
+    in_tmux: bool,
 }
 
 impl KittyTty {
@@ -41,8 +45,13 @@ impl KittyTty {
             .write(true)
             .open(&p)
             .with_context(|| format!("cannot open tty {}", p.display()))?;
+        // tmux sets TMUX in every pane it spawns. The opt-out env var covers
+        // the rare case of TMUX leaking through (e.g. detached session reused
+        // outside tmux) where wrapping would corrupt the escape.
+        let in_tmux = std::env::var_os("TMUX").is_some()
+            && std::env::var_os("JUPYNVIM_DISABLE_TMUX_PASSTHROUGH").is_none();
         Ok(Self {
-            inner: Arc::new(Mutex::new(KittyTtyInner { path: p })),
+            inner: Arc::new(Mutex::new(KittyTtyInner { path: p, in_tmux })),
         })
     }
 
@@ -52,7 +61,28 @@ impl KittyTty {
             .write(true)
             .open(&inner.path)
             .map_err(|e| anyhow!("tty open: {e}"))?;
-        f.write_all(bytes).map_err(|e| anyhow!("tty write: {e}"))?;
+        if inner.in_tmux {
+            // tmux's `allow-passthrough on` only forwards escape sequences
+            // that arrive wrapped as `ESC P tmux ; <body> ESC \`, with every
+            // internal ESC byte doubled (because ESC \ is the terminator).
+            // Raw Kitty graphics escapes get dropped by tmux otherwise; the
+            // Unicode placeholder still appears (it goes through neovim's
+            // normal redraw path, not /dev/tty) so the cell allocates space
+            // but the image never lands on the host terminal.
+            // Requires `set -g allow-passthrough on` in the user's tmux config.
+            let mut wrapped = Vec::with_capacity(bytes.len() * 2 + 16);
+            wrapped.extend_from_slice(b"\x1bPtmux;");
+            for &b in bytes {
+                wrapped.push(b);
+                if b == 0x1b {
+                    wrapped.push(0x1b);
+                }
+            }
+            wrapped.extend_from_slice(b"\x1b\\");
+            f.write_all(&wrapped).map_err(|e| anyhow!("tty write: {e}"))?;
+        } else {
+            f.write_all(bytes).map_err(|e| anyhow!("tty write: {e}"))?;
+        }
         f.flush().ok();
         Ok(())
     }
