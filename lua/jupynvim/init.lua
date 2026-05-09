@@ -192,6 +192,12 @@ function M.open(path, opts)
 
   local nb = Notebook.create(buf, abs, sid, snap)
   M._populate_buffer(nb)
+  -- Snapshot the rendered buffer text as the "saved" baseline. TextChanged
+  -- compares against this to decide whether to force modified=true. Without
+  -- a baseline, an open with no edits would still flip modified on the
+  -- first internal repaint that fires TextChanged.
+  nb.saved_hash = vim.fn.sha256(
+    table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n"))
   -- Wipe undo history. BufReadCmd pre-populates the buffer with one empty
   -- placeholder line per on-disk json line so plugins like snacks picker
   -- can call nvim_win_set_cursor without "Cursor position outside buffer"
@@ -629,14 +635,23 @@ function M._attach_autocmds(buf)
     callback = function()
       local nb = Notebook.get(buf)
       if not nb then return end
-      -- Force modified=true on every text-altering event. Vim's automatic
-      -- modified tracking depends on a saved-tick reference that we never
-      -- update because BufWriteCmd bypasses the normal :w path. After `u`
-      -- to undo previous-session edits, vim sometimes leaves modified=false
-      -- even though the buffer differs from on-disk content, so :wqa skips
-      -- the buffer entirely. Forcing the flag here makes :wqa always pick
-      -- up real text changes; _save resets it once the backend has written.
-      pcall(vim.api.nvim_buf_set_option, buf, "modified", true)
+      -- Mark the buffer modified IF the current text actually differs from
+      -- the last-saved state. Vim's automatic modified tracking depends on a
+      -- saved-tick reference that we never update because BufWriteCmd
+      -- bypasses the normal :w path - after `u` to revert previous-session
+      -- edits, vim sometimes leaves modified=false even though the buffer
+      -- differs from on-disk content, so :wqa would skip the buffer.
+      -- Comparing against saved_hash fixes that without falsely flagging
+      -- the buffer as modified on internal repaint events (rundo,
+      -- treesitter region updates, etc.) that fire TextChanged but don't
+      -- actually change visible text.
+      if nb.saved_hash then
+        local current = vim.fn.sha256(
+          table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n"))
+        if current ~= nb.saved_hash then
+          pcall(vim.api.nvim_buf_set_option, buf, "modified", true)
+        end
+      end
       -- Sync cell.source from buffer so render's content-driven filters
       -- (e.g., markdown image placeholder presence) reflect undo/redo
       -- restoring text. Without this, `u` brings the line back visually
@@ -747,6 +762,10 @@ function M._save(nb)
   end
   if vim.api.nvim_buf_is_valid(nb.buf) then
     vim.api.nvim_buf_set_option(nb.buf, "modified", false)
+    -- Refresh the saved-state hash so subsequent TextChanged checks compare
+    -- against the post-save buffer text, not the pre-save one.
+    nb.saved_hash = vim.fn.sha256(
+      table.concat(vim.api.nvim_buf_get_lines(nb.buf, 0, -1, false), "\n"))
     -- Persist undo history to disk. Vim's normal :w would do this for any
     -- buffer with undofile=true, but our BufWriteCmd handles save manually
     -- via the backend, bypassing vim's write path. Call wundo so subsequent
