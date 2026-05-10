@@ -1529,6 +1529,26 @@ function M.setup(opts)
   require("jupynvim.diag").setup()
   require("jupynvim.lsp").setup()
 
+  -- Inside tmux, image_renderer = "kitty" (direct placement) places at the
+  -- TTY's cursor coordinates and is never auto-cleaned, which surfaces as
+  -- "image at bottom of screen, persists after :qa". Auto-switch to
+  -- placeholder mode so users get the inline cell behavior they expect.
+  -- Set JUPYNVIM_FORCE_KITTY_IN_TMUX=1 to opt out and keep direct mode.
+  if M.config.image_renderer == "kitty"
+      and vim.env.TMUX ~= nil and vim.env.TMUX ~= ""
+      and not (vim.env.JUPYNVIM_FORCE_KITTY_IN_TMUX ~= nil
+               and vim.env.JUPYNVIM_FORCE_KITTY_IN_TMUX ~= "") then
+    M.config.image_renderer = "placeholder"
+    vim.schedule(function()
+      vim.notify(
+        "jupynvim: image_renderer='kitty' is unstable in tmux (places at " ..
+        "fixed screen coords, no auto-cleanup). Switching to 'placeholder' " ..
+        "for inline cell rendering. Set JUPYNVIM_FORCE_KITTY_IN_TMUX=1 to " ..
+        "keep direct mode.",
+        vim.log.levels.INFO)
+    end)
+  end
+
   vim.opt.conceallevel = 2
   vim.opt.concealcursor = "nc"
 
