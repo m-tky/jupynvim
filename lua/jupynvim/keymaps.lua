@@ -1,62 +1,108 @@
 -- Buffer-local keybindings for a notebook buffer.
+--
+-- Defaults can be overridden or disabled per-action via the user's setup:
+--
+--   require("jupynvim").setup({
+--     keymaps = {
+--       run_advance = "<leader>jr",   -- override lhs, keep default mode
+--       run_stay = false,             -- disable a binding
+--     },
+--     disable_default_keymaps = false,  -- set true to skip ALL defaults
+--   })
 
 local M = {}
 
-local function map(buf, mode, lhs, rhs, desc)
-  vim.keymap.set(mode, lhs, rhs, { buffer = buf, silent = true, desc = desc })
-end
+-- Default keybindings. Each entry: { mode, lhs, action_name, desc }.
+-- action_name maps to a function in init.lua's public api.
+M.defaults = {
+  run_advance      = { mode = { "n", "i" }, lhs = "<S-CR>",     desc = "Run cell + advance" },
+  run_stay         = { mode = { "n", "i" }, lhs = "<C-CR>",     desc = "Run cell" },
+  run_advance_alt  = { mode = "n",          lhs = "<leader>nr", desc = "Run cell + advance" },
+  run_all          = { mode = "n",          lhs = "<leader>nR", desc = "Run all cells" },
+  run_above        = { mode = "n",          lhs = "<leader>nA", desc = "Run all cells above" },
+  run_below        = { mode = "n",          lhs = "<leader>nB", desc = "Run all cells below" },
+  add_above        = { mode = "n",          lhs = "<leader>na", desc = "Add cell above" },
+  add_below        = { mode = "n",          lhs = "<leader>nb", desc = "Add cell below" },
+  delete_cell      = { mode = "n",          lhs = "<leader>nd", desc = "Delete cell" },
+  move_up          = { mode = "n",          lhs = "<leader>nk", desc = "Move cell up" },
+  move_down        = { mode = "n",          lhs = "<leader>nj", desc = "Move cell down" },
+  to_markdown      = { mode = "n",          lhs = "<leader>nm", desc = "→ markdown cell" },
+  to_code          = { mode = "n",          lhs = "<leader>ny", desc = "→ code cell" },
+  pick_kernel      = { mode = "n",          lhs = "<leader>nK", desc = "Pick kernel" },
+  start_kernel     = { mode = "n",          lhs = "<leader>ns", desc = "Start kernel" },
+  stop_kernel      = { mode = "n",          lhs = "<leader>nS", desc = "Stop kernel" },
+  interrupt_kernel = { mode = "n",          lhs = "<leader>ni", desc = "Interrupt kernel" },
+  restart_kernel   = { mode = "n",          lhs = "<leader>nx", desc = "Restart kernel" },
+  clear_output     = { mode = "n",          lhs = "<leader>nc", desc = "Clear current cell output" },
+  clear_all        = { mode = "n",          lhs = "<leader>nC", desc = "Clear all outputs" },
+  next_cell        = { mode = "n",          lhs = "]c",         desc = "Next cell" },
+  prev_cell        = { mode = "n",          lhs = "[c",         desc = "Prev cell" },
+  next_image       = { mode = "n",          lhs = "]i",         desc = "Next image cell" },
+  prev_image       = { mode = "n",          lhs = "[i",         desc = "Prev image cell" },
+  enter_output_dn  = { mode = "n",          lhs = "<C-j>",      desc = "Enter output below" },
+  enter_output_up  = { mode = "n",          lhs = "<C-k>",      desc = "Enter output above" },
+  save_image       = { mode = "n",          lhs = "<leader>nI", desc = "Save cell image" },
+  delete_image     = { mode = "n",          lhs = "<leader>nD", desc = "Delete cell image" },
+  refresh          = { mode = "n",          lhs = "<leader>nL", desc = "Refresh notebook display" },
+}
+
+-- Action name → function-builder taking (buf, api).
+-- Each builder returns the rhs callback for that action.
+local actions = {
+  run_advance      = function(buf, api) return function() api.run_cell(buf, { advance = true }) end end,
+  run_stay         = function(buf, api) return function() api.run_cell(buf, { advance = false }) end end,
+  run_advance_alt  = function(buf, api) return function() api.run_cell(buf, { advance = true }) end end,
+  run_all          = function(buf, api) return function() api.run_all(buf) end end,
+  run_above        = function(buf, api) return function() api.run_above(buf) end end,
+  run_below        = function(buf, api) return function() api.run_below(buf) end end,
+  add_above        = function(buf, api) return function() api.add_cell(buf, "above") end end,
+  add_below        = function(buf, api) return function() api.add_cell(buf, "below") end end,
+  delete_cell      = function(buf, api) return function() api.delete_cell(buf) end end,
+  move_up          = function(buf, api) return function() api.move_cell(buf, -1) end end,
+  move_down        = function(buf, api) return function() api.move_cell(buf, 1) end end,
+  to_markdown      = function(buf, api) return function() api.set_cell_type(buf, "markdown") end end,
+  to_code          = function(buf, api) return function() api.set_cell_type(buf, "code") end end,
+  pick_kernel      = function(buf, api) return function() api.kernel_picker(buf) end end,
+  start_kernel     = function(buf, api) return function() api.start_kernel(buf) end end,
+  stop_kernel      = function(buf, api) return function() api.stop_kernel(buf) end end,
+  interrupt_kernel = function(buf, api) return function() api.interrupt_kernel(buf) end end,
+  restart_kernel   = function(buf, api) return function() api.restart_kernel(buf) end end,
+  clear_output     = function(buf, api) return function() api.clear_cell_output(buf) end end,
+  clear_all        = function(buf, api) return function() api.clear_outputs(buf) end end,
+  next_cell        = function(buf, api) return function() api.jump_cell(buf, 1) end end,
+  prev_cell        = function(buf, api) return function() api.jump_cell(buf, -1) end end,
+  next_image       = function(buf, api) return function() api.jump_image(buf, 1) end end,
+  prev_image       = function(buf, api) return function() api.jump_image(buf, -1) end end,
+  enter_output_dn  = function(buf, api) return function() api.enter_output(buf, "down") end end,
+  enter_output_up  = function(buf, api) return function() api.enter_output(buf, "up") end end,
+  save_image       = function(buf, api) return function() api.save_image(buf) end end,
+  delete_image     = function(buf, api) return function() api.delete_image(buf) end end,
+  refresh          = function(buf, api) return function() api.refresh(buf) end end,
+}
 
 function M.attach(buf, api)
-  -- api = the jupynvim public api (init.lua) used to invoke ops
-  -- Run cell with shift+enter (advance) and ctrl+enter (stay)
-  map(buf, { "n", "i" }, "<S-CR>", function() api.run_cell(buf, { advance = true }) end, "Run cell + advance")
-  map(buf, { "n", "i" }, "<C-CR>", function() api.run_cell(buf, { advance = false }) end, "Run cell")
-  -- Some terminals send <CR> for shift+enter; provide leader fallback
-  map(buf, "n", "<leader>nr", function() api.run_cell(buf, { advance = true }) end, "Run cell + advance")
-  map(buf, "n", "<leader>nR", function() api.run_all(buf) end, "Run all cells")
-  map(buf, "n", "<leader>nA", function() api.run_above(buf) end, "Run all cells above")
-  map(buf, "n", "<leader>nB", function() api.run_below(buf) end, "Run all cells below")
-
-  -- Add / delete / move cells
-  map(buf, "n", "<leader>na", function() api.add_cell(buf, "above") end, "Add cell above")
-  map(buf, "n", "<leader>nb", function() api.add_cell(buf, "below") end, "Add cell below")
-  map(buf, "n", "<leader>nd", function() api.delete_cell(buf) end, "Delete cell")
-  map(buf, "n", "<leader>nk", function() api.move_cell(buf, -1) end, "Move cell up")
-  map(buf, "n", "<leader>nj", function() api.move_cell(buf, 1) end, "Move cell down")
-
-  -- Convert cell type
-  map(buf, "n", "<leader>nm", function() api.set_cell_type(buf, "markdown") end, "→ markdown cell")
-  map(buf, "n", "<leader>ny", function() api.set_cell_type(buf, "code") end, "→ code cell")
-
-  -- Kernel
-  map(buf, "n", "<leader>nK", function() api.kernel_picker(buf) end, "Pick kernel")
-  map(buf, "n", "<leader>ns", function() api.start_kernel(buf) end, "Start kernel")
-  map(buf, "n", "<leader>nS", function() api.stop_kernel(buf) end, "Stop kernel")
-  map(buf, "n", "<leader>ni", function() api.interrupt_kernel(buf) end, "Interrupt kernel")
-  map(buf, "n", "<leader>nx", function() api.restart_kernel(buf) end, "Restart kernel")
-  map(buf, "n", "<leader>nc", function() api.clear_cell_output(buf) end, "Clear current cell output")
-  map(buf, "n", "<leader>nC", function() api.clear_outputs(buf) end, "Clear all outputs")
-
-  -- Cell navigation
-  map(buf, "n", "]c", function() api.jump_cell(buf, 1) end, "Next cell")
-  map(buf, "n", "[c", function() api.jump_cell(buf, -1) end, "Prev cell")
-  map(buf, "n", "]i", function() api.jump_image(buf, 1) end, "Next image cell")
-  map(buf, "n", "[i", function() api.jump_image(buf, -1) end, "Prev image cell")
-
-  -- Open/close cell output in a scratch split where vim motions work.
-  -- <C-j> enters the current/next cell's output (going down), <C-k>
-  -- enters the previous cell's output (so it works when the cursor is
-  -- below an output region). q, <C-j>, or <C-k> from inside closes it.
-  map(buf, "n", "<C-j>", function() api.enter_output(buf, "down") end, "Enter output below")
-  map(buf, "n", "<C-k>", function() api.enter_output(buf, "up") end, "Enter output above")
-
-  -- Save the current cell's image to a file. Prompts for a path.
-  map(buf, "n", "<leader>nI", function() api.save_image(buf) end, "Save cell image")
-  -- Delete an embedded image from the markdown cell under the cursor.
-  map(buf, "n", "<leader>nD", function() api.delete_image(buf) end, "Delete cell image")
-
-  -- Refresh display
-  map(buf, "n", "<leader>nL", function() api.refresh(buf) end, "Refresh notebook display")
+  local cfg = api.config or {}
+  if cfg.disable_default_keymaps then return end
+  local overrides = cfg.keymaps or {}
+  for name, def in pairs(M.defaults) do
+    local override = overrides[name]
+    -- false explicitly disables the binding; nil leaves the default in place
+    if override == false then
+      -- skip
+    else
+      local lhs = def.lhs
+      if type(override) == "string" then
+        lhs = override
+      elseif type(override) == "table" and override.lhs then
+        lhs = override.lhs
+      end
+      local builder = actions[name]
+      if builder then
+        vim.keymap.set(def.mode, lhs, builder(buf, api),
+          { buffer = buf, silent = true, desc = def.desc })
+      end
+    end
+  end
 end
 
 return M

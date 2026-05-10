@@ -281,22 +281,54 @@ impl Server {
             .ok_or_else(|| anyhow!("session not found"))?
             .clone();
 
-        // Pick kernel: explicit > metadata > python3
-        let name = p
-            .get("kernel_name")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .or_else(|| session.notebook.read().kernel_name())
-            .unwrap_or_else(|| "python3".to_string());
+        // python_path bypasses kernelspec registry entirely. The frontend
+        // uses this to point at a project-local .venv/bin/python without
+        // requiring `python -m ipykernel install --user --name foo` first.
+        // Constructed kernelspec mimics what `ipykernel install` would
+        // produce: argv launches python -m ipykernel_launcher with the
+        // standard {connection_file} substitution.
+        let spec = if let Some(py) = p.get("python_path").and_then(|v| v.as_str()) {
+            let py = py.to_string();
+            let path_buf = std::path::PathBuf::from(&py);
+            let parent = path_buf
+                .parent()
+                .and_then(|p| p.parent())
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| path_buf.clone());
+            kernelspec::KernelSpec {
+                name: "venv-python".to_string(),
+                path: parent,
+                argv: vec![
+                    py,
+                    "-m".to_string(),
+                    "ipykernel_launcher".to_string(),
+                    "-f".to_string(),
+                    "{connection_file}".to_string(),
+                ],
+                display_name: "venv python".to_string(),
+                language: "python".to_string(),
+                interrupt_mode: None,
+                env: std::collections::HashMap::new(),
+                metadata: serde_json::Value::Null,
+            }
+        } else {
+            // Pick kernel: explicit > metadata > python3
+            let name = p
+                .get("kernel_name")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .or_else(|| session.notebook.read().kernel_name())
+                .unwrap_or_else(|| "python3".to_string());
 
-        // Resolve with version-tolerant fallback so a notebook saved with
-        // kernelspec name "julia" or "julia-1.10" still opens on a machine
-        // with only julia-1.12 installed. Same for python3 vs python3.13,
-        // ir vs ir-r-4.5, etc. The notebook's metadata language gives us a
-        // last-resort hint for cross-version mismatch.
-        let language = session.notebook.read().kernel_language();
-        let spec = kernelspec::discover_with_fallback(&name, language.as_deref())
-            .ok_or_else(|| anyhow!("no kernelspec found for '{name}' (and no fallback by language)"))?;
+            // Resolve with version-tolerant fallback so a notebook saved with
+            // kernelspec name "julia" or "julia-1.10" still opens on a machine
+            // with only julia-1.12 installed. Same for python3 vs python3.13,
+            // ir vs ir-r-4.5, etc. The notebook's metadata language gives us a
+            // last-resort hint for cross-version mismatch.
+            let language = session.notebook.read().kernel_language();
+            kernelspec::discover_with_fallback(&name, language.as_deref())
+                .ok_or_else(|| anyhow!("no kernelspec found for '{name}' (and no fallback by language)"))?
+        };
 
         let cwd = session.path.parent().map(|p| p.to_path_buf());
         let kernel = Kernel::launch(spec, cwd).await?;

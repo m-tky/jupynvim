@@ -24,6 +24,17 @@ M.config = {
   -- "kitty":       real PNG via direct placement (lives at fixed screen coords)
   -- "chafa":       ASCII art fallback for terminals without graphics support
   image_renderer = "placeholder",
+  -- Per-action keymap overrides. Each value is either a string (replace lhs)
+  -- or `false` (disable). See lua/jupynvim/keymaps.lua for the full default
+  -- list. nil/missing leaves the default in place.
+  keymaps = {},
+  -- Skip ALL default keybindings if you want to bind everything yourself.
+  disable_default_keymaps = false,
+  -- Auto-detect a `.venv` next to the notebook (or in any parent directory)
+  -- and use its python as the kernel interpreter. Bypasses needing to
+  -- `ipykernel install --user` in every uv/poetry/pdm project. Set false
+  -- to keep the old behavior of using only registered kernelspecs.
+  auto_venv = true,
 }
 
 -- ---------- backend helpers ----------
@@ -134,6 +145,28 @@ end
 -- ---------- buffer lifecycle ----------
 
 M._opening = M._opening or {}
+
+-- Walk up from `start_dir` looking for a `.venv/bin/python` (or
+-- `.venv/Scripts/python.exe` on Windows). Return the python path if the venv
+-- exists AND ipykernel is importable from it. nil otherwise.
+local function find_local_venv_python(start_dir)
+  local is_win = package.config:sub(1, 1) == "\\"
+  local rel = is_win and ".venv\\Scripts\\python.exe" or ".venv/bin/python"
+  local dir = start_dir
+  for _ = 1, 10 do
+    local candidate = dir .. "/" .. rel
+    if vim.fn.executable(candidate) == 1 then
+      vim.fn.system({ candidate, "-c", "import ipykernel" })
+      if vim.v.shell_error == 0 then return candidate end
+      return nil  -- venv exists but no ipykernel - don't fall back silently
+    end
+    local parent = vim.fn.fnamemodify(dir, ":h")
+    if parent == dir then break end
+    dir = parent
+  end
+  return nil
+end
+M._find_local_venv_python = find_local_venv_python
 
 function M.open(path, opts)
   opts = opts or {}
@@ -303,21 +336,32 @@ function M.open(path, opts)
   -- once to harvest its real site-packages directories.
   local py_path
   local extra_paths = {}
-  local kspec_name = (snap.metadata and snap.metadata.kernelspec and snap.metadata.kernelspec.name) or "python3"
-  local kerr, kres = M.client:call_sync("list_kernels", {}, 2000)
-  if not kerr and type(kres) == "table" then
-    for _, k in ipairs(kres) do
-      if k.name == kspec_name and k.argv and k.argv[1] then
-        py_path = k.argv[1]
-        local sys_path = vim.fn.system({ py_path, "-c", "import sys; print('\\n'.join(p for p in sys.path if p))" })
-        if vim.v.shell_error == 0 then
-          for line in sys_path:gmatch("[^\r\n]+") do
-            if line:find("site%-packages") or line:find("dist%-packages") then
-              table.insert(extra_paths, line)
-            end
-          end
+  -- Auto-detected .venv takes precedence over registered kernelspec, since
+  -- the user effectively asked for project-local environment by putting the
+  -- notebook next to one. Falls through to kernelspec lookup otherwise.
+  if M.config.auto_venv ~= false then
+    local nb_dir = vim.fn.fnamemodify(abs, ":h")
+    py_path = find_local_venv_python(nb_dir)
+  end
+  if not py_path then
+    local kspec_name = (snap.metadata and snap.metadata.kernelspec and snap.metadata.kernelspec.name) or "python3"
+    local kerr, kres = M.client:call_sync("list_kernels", {}, 2000)
+    if not kerr and type(kres) == "table" then
+      for _, k in ipairs(kres) do
+        if k.name == kspec_name and k.argv and k.argv[1] then
+          py_path = k.argv[1]
+          break
         end
-        break
+      end
+    end
+  end
+  if py_path then
+    local sys_path = vim.fn.system({ py_path, "-c", "import sys; print('\\n'.join(p for p in sys.path if p))" })
+    if vim.v.shell_error == 0 then
+      for line in sys_path:gmatch("[^\r\n]+") do
+        if line:find("site%-packages") or line:find("dist%-packages") then
+          table.insert(extra_paths, line)
+        end
       end
     end
   end
@@ -366,9 +410,18 @@ end
 --    skip the buftype guard.
 function M._attach_lsp(buf, ft, py_path, extra_paths)
   -- Force-load any LSP plugins gated on BufReadPre that our BufReadCmd skipped.
+  -- Only attempt plugins lazy.nvim actually knows about. Without the per-name
+  -- check, lazy.load emits "Plugin X not found" notifications for users who
+  -- don't have nvim-lspconfig / mason installed. (Reported in #6 by medwatt.)
   pcall(function()
-    local lazy = require("lazy")
-    lazy.load({ plugins = { "nvim-lspconfig", "mason-lspconfig.nvim", "mason.nvim" } })
+    local ok_lazy, lazy = pcall(require, "lazy")
+    if not ok_lazy then return end
+    local known = require("lazy.core.config").plugins or {}
+    local to_load = {}
+    for _, name in ipairs({ "nvim-lspconfig", "mason-lspconfig.nvim", "mason.nvim" }) do
+      if known[name] then table.insert(to_load, name) end
+    end
+    if #to_load > 0 then lazy.load({ plugins = to_load }) end
   end)
   -- Some setups also register configs by firing BufReadPre at FileType time.
   pcall(vim.api.nvim_exec_autocmds, "BufReadPre", { buffer = buf, modeline = false })
@@ -1025,7 +1078,25 @@ function M.start_kernel(buf, kernel_name)
   -- BufReadCmd re-firing) and orphan ipykernel processes.
   if nb.kernel_started and not kernel_name then return end
   local cl = ensure_client()
-  cl:call("start_kernel", { session_id = nb.session_id, kernel_name = kernel_name }, function(err, res)
+  -- Auto-detect a local .venv near the notebook and use its python directly,
+  -- bypassing the global kernelspec registry. Only on auto-start (no
+  -- explicit kernel_name) so users picking via `<leader>nK` aren't
+  -- overridden. Disable with `auto_venv = false` in setup.
+  local python_path = nil
+  if not kernel_name and M.config.auto_venv ~= false then
+    local nb_dir = nb.path and vim.fn.fnamemodify(nb.path, ":h") or nil
+    if nb_dir then
+      python_path = find_local_venv_python(nb_dir)
+      if python_path then
+        Log.info("auto_venv: using " .. python_path)
+      end
+    end
+  end
+  cl:call("start_kernel", {
+    session_id = nb.session_id,
+    kernel_name = kernel_name,
+    python_path = python_path,
+  }, function(err, res)
     if err then
       vim.notify("start_kernel: " .. tostring(err), vim.log.levels.ERROR)
       return
