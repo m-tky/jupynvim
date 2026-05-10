@@ -706,6 +706,14 @@ function M._attach_autocmds(buf)
         return
       end
       local nb = Notebook.get(buf)
+      -- For clients that advertise notebookDocumentSync (ty etc.), send
+      -- the LSP notebook protocol's didOpen so they receive proper cell
+      -- structure instead of choking on our rendered-cell textDocument view.
+      if nb and client then
+        pcall(function()
+          require("jupynvim.notebook_lsp").on_attach(buf, nb, client)
+        end)
+      end
       if nb and nb.kernel_python_path then
         vim.schedule(function()
           M._sync_lsp_python_path(buf, nb.kernel_python_path, nb.kernel_extra_paths)
@@ -776,6 +784,8 @@ function M._attach_autocmds(buf)
       end
       Render.refresh(nb, vim.fn.bufwinid(buf))
       M._sync_treesitter_ranges(nb)
+      -- Push cell-array diff to notebook-aware LSPs (ty etc.).
+      pcall(function() require("jupynvim.notebook_lsp").on_text_change(buf, nb) end)
     end,
   })
   vim.api.nvim_create_autocmd("BufWipeout", {
@@ -785,6 +795,7 @@ function M._attach_autocmds(buf)
       if nb and nb.session_id then
         ensure_client():call("close", { session_id = nb.session_id }, function() end)
       end
+      pcall(function() require("jupynvim.notebook_lsp").on_close(buf) end)
       Notebook.remove(buf)
       pcall(Image.delete_all)
     end,
