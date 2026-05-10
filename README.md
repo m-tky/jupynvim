@@ -60,6 +60,10 @@ https://github.com/user-attachments/assets/36bdca18-c964-423c-8c99-6f243d4ac1b2
   Kitty graphics escapes. Set `JUPYNVIM_DISABLE_TMUX_PASSTHROUGH=1` if
   you have `TMUX` set but are not actually inside a multiplexer.
 
+  jupynvim auto-switches `image_renderer = "kitty"` to `"placeholder"`
+  inside tmux because direct placement places at fixed screen coords and
+  doesn't auto-clean. Set `JUPYNVIM_FORCE_KITTY_IN_TMUX=1` to override.
+
 `chafa` is optional. Install it if you want an ASCII-art fallback for
 terminals without graphics support.
 
