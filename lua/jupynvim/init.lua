@@ -35,6 +35,18 @@ M.config = {
   -- `ipykernel install --user` in every uv/poetry/pdm project. Set false
   -- to keep the old behavior of using only registered kernelspecs.
   auto_venv = true,
+  -- LSP server names that should NOT attach to jupynvim buffers. Empty
+  -- by default: users opt in for the ones that misbehave.
+  --
+  -- Common candidate: `ty` (Astral). It advertises notebookDocumentSync
+  -- capability and assumes a `.ipynb` URI's buffer text must be the file's
+  -- JSON content. jupynvim's buffer is the rendered cell view, not the
+  -- on-disk JSON, so ty emits a "Failed to read notebook" diagnostic on
+  -- every notebook open. Add `lsp_blocklist = { "ty" }` to setup if you
+  -- hit this and don't need ty on notebooks. The proper long-term fix is
+  -- jupynvim implementing the LSP notebook protocol so ty (and future
+  -- notebook-aware LSPs) can do per-cell analysis. Tracked for v0.3.
+  lsp_blocklist = {},
 }
 
 -- ---------- backend helpers ----------
@@ -439,7 +451,14 @@ function M._attach_lsp(buf, ft, py_path, extra_paths)
     end, 200)
     return
   end
+  -- LSP servers the user blocked from attaching to jupynvim buffers. ty,
+  -- for example, treats `.ipynb` URIs as raw notebooks and emits a
+  -- "Failed to read notebook ... isn't valid JSON" diagnostic on every
+  -- buffer because our rendered cell view isn't JSON.
+  local blocklist = {}
+  for _, n in ipairs(M.config.lsp_blocklist or {}) do blocklist[n] = true end
   for name in pairs(lsp._enabled_configs) do
+    if blocklist[name] then goto continue end
     local config = lsp.config[name]
     local ft_ok = config
       and (not config.filetypes or vim.tbl_contains(config.filetypes, ft))
@@ -547,6 +566,7 @@ function M._attach_lsp(buf, ft, py_path, extra_paths)
         start_with_log()
       end
     end
+    ::continue::
   end
 end
 
@@ -674,7 +694,17 @@ function M._attach_autocmds(buf)
   -- this client - re-push the kernel's pythonPath now.
   vim.api.nvim_create_autocmd("LspAttach", {
     group = group, buffer = buf,
-    callback = function()
+    callback = function(args)
+      -- Defensively detach blocklisted LSPs. Our manual attach path skips
+      -- them, but other paths (LazyVim auto-attach, FileType handlers)
+      -- might still attach them, so catch them here too.
+      local blocklist = {}
+      for _, n in ipairs(M.config.lsp_blocklist or {}) do blocklist[n] = true end
+      local client = vim.lsp.get_client_by_id(args.data.client_id)
+      if client and blocklist[client.name] then
+        pcall(vim.lsp.buf_detach_client, args.buf, args.data.client_id)
+        return
+      end
       local nb = Notebook.get(buf)
       if nb and nb.kernel_python_path then
         vim.schedule(function()
