@@ -29,12 +29,22 @@ https://github.com/user-attachments/assets/36bdca18-c964-423c-8c99-6f243d4ac1b2
   with the kernel's interpreter so `numpy`, `matplotlib`, and project deps
   resolve. Diagnostics are scoped to code-cell line ranges so markdown text
   doesn't drown you in fake errors.
+- LSP notebook protocol for notebook-aware servers (Astral's `ty`, future
+  ones). jupynvim sends `notebookDocument/didOpen` and `didChange` with
+  proper cell URIs so servers that advertise `notebookDocumentSync` analyze
+  cells correctly instead of choking on the rendered cell view as if it
+  were JSON. Per-cell diagnostics map back to buffer rows and accumulate
+  across cells.
 - Kernel-driven completion and hover for any language. A virtual LSP proxies
   the running kernel's `complete_request` and `inspect_request`, so names
   defined in earlier cells show up in completion and `K` brings up the
   kernel's own docstring. nvim-cmp and blink.cmp consume it through the
   standard LSP client. Works for Python, Julia, R, or anything else whose
   kernel implements those messages.
+- Auto-detect a project-local `.venv`. If a notebook lives next to (or
+  inside) a uv/poetry/pdm project with a `.venv` containing `ipykernel`,
+  the kernel spawns from that interpreter directly. No need to
+  `python -m ipykernel install --user --name foo` per project.
 - Multi-image markdown cells are supported. `<leader>nD` deletes one image
   and `u` brings it back.
 - One Rust binary, one Lua plugin. No `pynvim`, no `jupyter_client`, no
@@ -246,6 +256,31 @@ require("jupynvim").setup({
   -- Override the path to the jupynvim-core binary. Auto-detected from the
   -- plugin directory if unset.
   core_path = nil,
+
+  -- Per-action keymap overrides. Pass a string to replace the default lhs
+  -- (mode and description preserved), `false` to disable a binding. The
+  -- full action list lives in lua/jupynvim/keymaps.lua.
+  keymaps = {
+    -- run_advance = "<leader>jr",  -- example: rebind run-and-advance
+    -- move_up = false,             -- example: disable move-cell-up
+  },
+
+  -- Skip the entire default keymap set if you want to bind everything yourself.
+  disable_default_keymaps = false,
+
+  -- Walk up from the notebook's directory to find a `.venv/bin/python` (or
+  -- `.venv/Scripts/python.exe` on Windows) and use it as the kernel
+  -- interpreter when ipykernel is installed there. Bypasses needing to
+  -- register a per-project user kernel. Set false to use only registered
+  -- kernelspecs.
+  auto_venv = true,
+
+  -- LSP servers to skip on jupynvim buffers. Useful for servers that
+  -- misbehave on `.ipynb` URIs without advertising notebook capability.
+  -- Notebook-aware servers (anything with notebookDocumentSync) are
+  -- handled correctly via the LSP notebook protocol and don't need to be
+  -- listed here.
+  lsp_blocklist = {},
 })
 ```
 
@@ -278,6 +313,20 @@ Kernel completion and hover come from a second, virtual LSP. A
 Lua-defined `vim.lsp.start` config forwards `textDocument/completion` and
 `textDocument/hover` to the running kernel over msgpack-RPC, so standard
 LSP clients see kernel matches and docstrings as plain LSP results.
+
+Notebook-aware servers (Astral's `ty`, future ones) get a different
+treatment. Those servers expect the LSP notebook protocol
+(`notebookDocument/didOpen` with cell array, `notebookDocument/didChange`
+with cell-array diffs) and assume any `.ipynb` URI's buffer text is the
+file's JSON content. Sending them our rendered cell view via the regular
+`textDocument/didOpen` makes them try to JSON-parse the rendered text,
+which fails. jupynvim detects the `notebookDocumentSync` capability,
+suppresses `textDocument/*` for the notebook URI on those clients, and
+sends `notebookDocument/*` with stable cell URIs of the form
+`vscode-notebook-cell:/<path>#<cell_id>`. Diagnostics come back keyed by
+cell URI; an overridden `textDocument/publishDiagnostics` handler maps
+them to buffer rows and accumulates across cells so each server's
+findings coexist correctly.
 
 ## Architecture
 
